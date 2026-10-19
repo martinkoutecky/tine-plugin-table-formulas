@@ -1,0 +1,297 @@
+{
+ "source": "org-mode testing/lisp/test-org-table.el (hand-transcribed: tests that do not use org-test-table-target-expect)",
+ "revision": "f38ac21c28f93da1fed1cb4bb46ec3006636f809",
+ "cases": [
+  {
+   "id": "test-org-table/end-on-hline@2123#1",
+   "test": "test-org-table/end-on-hline",
+   "line": 2123,
+   "laps": 1,
+   "input": "\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n|   |   |   |\n|---+---+---|\n#+TBLFM: @3$2..@3$>=vsum(@1..@2)",
+   "expected": "\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n|   | 7 | 9 |\n|---+---+---|\n#+TBLFM: @3$2..@3$>=vsum(@1..@2)"
+  },
+  {
+   "id": "test-org-table/formula-priority@2176#1",
+   "test": "test-org-table/formula-priority",
+   "line": 2176,
+   "laps": 1,
+   "input": "| 1 |   |\n| 2 |   |\n#+tblfm: $2=3*$1::@2$2=99",
+   "expected": "| 1 |  3 |\n| 2 | 99 |\n#+tblfm: $2=3*$1::@2$2=99"
+  },
+  {
+   "id": "test-org-table/formula-priority@2176#2",
+   "test": "test-org-table/formula-priority",
+   "line": 2176,
+   "laps": 1,
+   "input": "| 1 |  3 |\n| 2 | 99 |\n#+tblfm: $2=3*$1",
+   "expected": "| 1 | 3 |\n| 2 | 6 |\n#+tblfm: $2=3*$1",
+   "note": "second half of the test: the field formula removed, the column formula applies again"
+  },
+  {
+   "id": "test-org-table/first-rc@2212#1",
+   "test": "test-org-table/first-rc",
+   "line": 2212,
+   "laps": 1,
+   "input": "|   | 2 |\n#+TBLFM: $<=1",
+   "expected_regex": "\\| 1 \\| 2 \\|"
+  },
+  {
+   "id": "test-org-table/first-rc@2212#2",
+   "test": "test-org-table/first-rc",
+   "line": 2212,
+   "laps": 1,
+   "input": "| 2 |\n|   |\n#+TBLFM: @2$1=@<",
+   "expected_regex": "\\| 2 \\|\\n\\| 2 \\|"
+  },
+  {
+   "id": "test-org-table/last-rc@2231#1",
+   "test": "test-org-table/last-rc",
+   "line": 2231,
+   "laps": 1,
+   "input": "| 2 |   |\n#+TBLFM: $>=1",
+   "expected_regex": "\\| 2 \\| 1 \\|"
+  },
+  {
+   "id": "test-org-table/last-rc@2231#2",
+   "test": "test-org-table/last-rc",
+   "line": 2231,
+   "laps": 1,
+   "input": "| 2 |\n|   |\n#+TBLFM: @>$1=@<",
+   "expected_regex": "\\| 2 \\|\\n\\| 2 \\|"
+  },
+  {
+   "id": "test-org-table/single-rowgroup@2334#1",
+   "test": "test-org-table/single-rowgroup",
+   "line": 2334,
+   "laps": 1,
+   "input": "\n|---+---|\n| 1 |   |\n|---+---|\n#+TBLFM: $2=$1-1",
+   "expected": "\n|---+---|\n| 1 | 0 |\n|---+---|\n#+TBLFM: $2=$1-1"
+  },
+  {
+   "id": "test-org-table/single-rowgroup@2334#2",
+   "test": "test-org-table/single-rowgroup",
+   "line": 2334,
+   "laps": 1,
+   "input": "\n| 1 |   |\n#+TBLFM: $2=$1-1",
+   "expected": "\n| 1 | 0 |\n#+TBLFM: $2=$1-1"
+  },
+  {
+   "id": "test-org-table/field-formula-outside-table@2029#1",
+   "test": "test-org-table/field-formula-outside-table",
+   "line": 2029,
+   "laps": 1,
+   "input": "\n| 2 |\n| 4 |\n| 8 |\n#+TBLFM: @1$2=5",
+   "note": "org-table-formula-create-columns nil (the default): user-error"
+  },
+  {
+   "id": "test-org-table/field-formula-outside-table@2029#3",
+   "test": "test-org-table/field-formula-outside-table",
+   "line": 2029,
+   "laps": 1,
+   "input": "\n| 2 |\n| 4 |\n| 8 |\n#+TBLFM: $3=15",
+   "expected": "\n| 2 |   | 15 |\n| 4 |   | 15 |\n| 8 |   | 15 |\n#+TBLFM: $3=15",
+   "note": "the test sets create-columns t; column formulas extend rows regardless (org-table-recalculate passes 'force)"
+  },
+  {
+   "id": "test-org-table/org-table-calc-current-TBLFM@1258#1",
+   "test": "test-org-table/org-table-calc-current-TBLFM",
+   "line": 1258,
+   "laps": 1,
+   "input": "\n| 1 |   |\n| 2 |   |\n#+TBLFM: $2=$1*1\n#+TBLFM: $2=$1*2\n#+TBLFM: $2=$1*3\n",
+   "expected": "\n| 1 | 1 |\n| 2 | 2 |\n#+TBLFM: $2=$1*1\n#+TBLFM: $2=$1*2\n#+TBLFM: $2=$1*3\n",
+   "note": "the plugin applies the first #+TBLFM line, as org-table-recalculate does"
+  },
+  {
+   "id": "test-org-table/org-table-calc-current-TBLFM-when-stop-because-of-error@1295#1",
+   "test": "test-org-table/org-table-calc-current-TBLFM-when-stop-because-of-error",
+   "line": 1295,
+   "laps": 1,
+   "input": "\n| 1 | 1 |\n| 2 | 2 |\n#+TBLFM: $2=$1*2::$2=$1*2\n",
+   "note": "adapted: the double definition is on the line the plugin reads; Org errors and keeps the buffer"
+  },
+  {
+   "id": "test-org-table/align@1762#1",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "|   a |\n",
+   "expected": "| a |\n"
+  },
+  {
+   "id": "test-org-table/align@1762#2",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "  |   a |\n",
+   "expected": "  | a |\n"
+  },
+  {
+   "id": "test-org-table/align@1762#3",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| 123 |\n|-|\n",
+   "expected": "| 123 |\n|-----|\n"
+  },
+  {
+   "id": "test-org-table/align@1762#4",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| a | b |\n|-+-|\n",
+   "expected": "| a | b |\n|---+---|\n"
+  },
+  {
+   "id": "test-org-table/align@1762#5",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| a | bc |\n| bcd |  |\n",
+   "expected": "| a   | bc |\n| bcd |    |\n"
+  },
+  {
+   "id": "test-org-table/align@1762#6",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| abc | bc |\n| | bcd |\n",
+   "expected": "| abc | bc  |\n|     | bcd |\n"
+  },
+  {
+   "id": "test-org-table/align@1762#7",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| a | b |\n| c |\n",
+   "expected": "| a | b |\n| c |   |\n"
+  },
+  {
+   "id": "test-org-table/align@1762#8",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| a | b |\n|---|\n",
+   "expected": "| a | b |\n|---+---|\n"
+  },
+  {
+   "id": "test-org-table/align@1762#9",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| 1 |\n| 12 |\n| abc |",
+   "expected": "|   1 |\n|  12 |\n| abc |"
+  },
+  {
+   "id": "test-org-table/align@1762#10",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| 1 |\n| ab |\n| abc |",
+   "expected": "| 1   |\n| ab  |\n| abc |"
+  },
+  {
+   "id": "test-org-table/align@1762#11",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| <r> |\n| ab |\n| abc |",
+   "expected": "| <r> |\n|  ab |\n| abc |"
+  },
+  {
+   "id": "test-org-table/align@1762#12",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| <l> |\n| 12 |\n| 123 |",
+   "expected": "| <l> |\n| 12  |\n| 123 |"
+  },
+  {
+   "id": "test-org-table/align@1762#13",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "| <c> |\n| 1 |\n| 123 |",
+   "expected": "| <c> |\n|  1  |\n| 123 |"
+  },
+  {
+   "id": "test-org-table/align@1762#14",
+   "test": "test-org-table/align",
+   "line": 1762,
+   "laps": null,
+   "input": "\n| a        | b |\n|----------+---|\n| [[c][c]] | d |",
+   "expected": "\n| a | b |\n|---+---|\n| [[c][c]] | d |"
+  },
+  {
+   "id": "test-org-table/named-field@2143#1",
+   "test": "test-org-table/named-field",
+   "line": 2143,
+   "laps": 1,
+   "input": "\n|   |      |\n| ^ | name |\n#+TBLFM: $name=1",
+   "expected_regex": "\\| +\\| +1 +\\|"
+  },
+  {
+   "id": "test-org-table/named-field@2143#2",
+   "test": "test-org-table/named-field",
+   "line": 2143,
+   "laps": 1,
+   "input": "\n| _ | name |\n|   |      |\n#+TBLFM: $name=1",
+   "expected_regex": "\\| +\\| +1 +\\|"
+  },
+  {
+   "id": "test-org-table/named-column@2164#1",
+   "test": "test-org-table/named-column",
+   "line": 2164,
+   "laps": 1,
+   "input": "\n| ! | name |   |\n|   |    1 |   |\n#+TBLFM: @2$3=$name",
+   "expected_regex": "\\| +\\| +1 +\\| +1 +\\|"
+  },
+  {
+   "id": "test-org-table/tab-indent@2197#1",
+   "test": "test-org-table/tab-indent",
+   "line": 2197,
+   "laps": 1,
+   "input": "\n\t| ! |  sum |      | a |  b |   c |\n\t|---+------+------+---+----+-----|\n\t| # | 1011 | 1000 | 1 | 10 | 100 |\n\t#+TBLFM: $2=$a+$b+$c\n",
+   "expected_regex": "\\| # \\| 111 \\|"
+  },
+  {
+   "id": "test-org-table/timestamps@2248#1",
+   "test": "test-org-table/timestamps",
+   "line": 2248,
+   "laps": 1,
+   "input": "| <2016-07-07 Sun> | <2016-07-08 Fri> |   |\n#+TBLFM: $3=$2-$1",
+   "expected_regex": "\\| 1 \\|"
+  },
+  {
+   "id": "test-org-table/timestamps@2248#2",
+   "test": "test-org-table/timestamps",
+   "line": 2248,
+   "laps": 1,
+   "input": "| <2016-07-07 Do> | <2016-07-08 Fr> |   |\n#+TBLFM: $3=$2-$1",
+   "expected_regex": "\\| 1 \\|"
+  },
+  {
+   "id": "test-org-table/duration@2075#1",
+   "test": "test-org-table/duration",
+   "line": 2075,
+   "laps": 1,
+   "input": "\n       | 2:12 | 1:47 | |\n       #+TBLFM: @1$3=$1+$2;T",
+   "expected_regex": "\\| 2:12 \\| 1:47 \\| 03:59:00 \\|"
+  },
+  {
+   "id": "test-org-table/duration@2075#2",
+   "test": "test-org-table/duration",
+   "line": 2075,
+   "laps": 1,
+   "input": "\n       | 2:12 | 1:47 | |\n       #+TBLFM: @1$3=$1+$2;U",
+   "expected_regex": "\\| 2:12 \\| 1:47 \\| 03:59 \\|"
+  },
+  {
+   "id": "test-org-table/duration@2075#3",
+   "test": "test-org-table/duration",
+   "line": 2075,
+   "laps": 1,
+   "input": "\n       | 3:02:20 | -2:07:00 | |\n       #+TBLFM: @1$3=$1+$2;t",
+   "expected_regex": "\\| 3:02:20 \\| -2:07:00 \\| 0.92 \\|"
+  }
+ ]
+}

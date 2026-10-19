@@ -1,0 +1,26 @@
+[package]
+name = "tine-plugin-table-formulas"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tine-plugin-sdk = { git = "https://github.com/martinkoutecky/tine", rev = "daabe817fd5b2e53ad0384a207714cfbc752d733" }
+regex = { version = "1", default-features = false, features = ["std"] }
+unicode-width = "0.2"
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-traits = { version = "0.2", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[dev-dependencies]
+serde_json = "1"

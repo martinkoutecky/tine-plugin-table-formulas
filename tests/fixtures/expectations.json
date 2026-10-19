@@ -1,0 +1,210 @@
+{
+ "test-org-table/simple-formula/no-grouping/no-title-row@37#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/simple-formula/no-grouping/with-title-row@58#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/simple-formula/with-grouping/no-title-row@85#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/simple-formula/with-grouping/no-title-row@110#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/simple-formula/with-grouping/with-title-row@135#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-EL@183#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-EL@200#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-E@233#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-E@243#1": {
+  "status": "declined",
+  "why": "Calc symbolic algebra on a non-number field: not supported"
+ },
+ "test-org-table/references/mode-string-EN@275#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-L@298#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-none@324#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/references/mode-string-none@334#1": {
+  "status": "declined",
+  "why": "Calc symbolic algebra on a non-number field: not supported"
+ },
+ "test-org-table/references/mode-string-N@367#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/mode-string-u@389#1": {
+  "status": "declined",
+  "why": "units mode (u): out of scope"
+ },
+ "test-org-table/lisp-return-value@400#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/compare@476#1": {
+  "status": "declined",
+  "why": "Calc symbolic algebra on a non-number field: not supported"
+ },
+ "test-org-table/empty-field@494#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/empty-field@512#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/empty-field@555#1": {
+  "status": "declined",
+  "why": "Calc function outside the subset"
+ },
+ "test-org-table/empty-field@555#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/copy-field@604#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/copy-field@617#1": {
+  "status": "declined",
+  "why": "dates: out of scope; Calc function outside the subset"
+ },
+ "test-org-table/copy-field@631#1": {
+  "status": "declined",
+  "why": "dates: out of scope; Calc symbolic algebra on a non-number field: not supported"
+ },
+ "test-org-table/org-lookup-all@824#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/org-lookup-all@846#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/remote-reference-access@1026#1": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept; remote(): out of scope"
+ },
+ "test-org-table/remote-reference-indirect@1068#1": {
+  "status": "declined",
+  "why": "remote(): out of scope; Calc symbolic algebra on a non-number field: not supported"
+ },
+ "test-org-table/remote-reference-indirect@1068#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/remote-reference-indirect@1095#1": {
+  "status": "declined",
+  "why": "remote(): out of scope; Calc symbolic algebra on a non-number field: not supported"
+ },
+ "test-org-table/remote-reference-indirect@1095#2": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "test-org-table/named-field@2143#1": {
+  "status": "declined",
+  "why": "named fields/columns: not supported"
+ },
+ "test-org-table/named-field@2143#2": {
+  "status": "declined",
+  "why": "named fields/columns: not supported"
+ },
+ "test-org-table/named-column@2164#1": {
+  "status": "declined",
+  "why": "named fields/columns: not supported"
+ },
+ "test-org-table/tab-indent@2197#1": {
+  "status": "declined",
+  "why": "named fields/columns: not supported"
+ },
+ "test-org-table/timestamps@2248#1": {
+  "status": "declined",
+  "why": "dates: out of scope"
+ },
+ "test-org-table/timestamps@2248#2": {
+  "status": "declined",
+  "why": "dates: out of scope"
+ },
+ "test-org-table/duration@2075#1": {
+  "status": "declined",
+  "why": "durations: out of scope"
+ },
+ "test-org-table/duration@2075#2": {
+  "status": "declined",
+  "why": "durations: out of scope"
+ },
+ "test-org-table/duration@2075#3": {
+  "status": "declined",
+  "why": "durations: out of scope"
+ },
+ "test-org-table/field-formula-outside-table@2029#1": {
+  "status": "abort",
+  "why": "Org: Missing columns in the table (user-error)"
+ },
+ "test-org-table/org-table-calc-current-TBLFM-when-stop-because-of-error@1295#1": {
+  "status": "abort",
+  "why": "Org: Double definition (user-error)"
+ },
+ "emacs-calc-prec-f3": {
+  "status": "declined",
+  "why": "Calc function sqrt outside the subset"
+ },
+ "emacs-calc-sqrt": {
+  "status": "declined",
+  "why": "Calc function sqrt outside the subset"
+ },
+ "emacs-calc-pow": {
+  "status": "declined",
+  "why": "`^` of a float: outside the subset"
+ },
+ "emacs-vmean": {
+  "status": "declined",
+  "why": "empty range (no second hline): Calc keeps vmean([]) symbolically"
+ },
+ "emacs-text-mul": {
+  "status": "declined",
+  "why": "Calc symbolic arithmetic on a text field"
+ },
+ "emacs-lisp-kept": {
+  "status": "declined",
+  "why": "Emacs Lisp formula: out of scope, kept"
+ },
+ "emacs-mod": {
+  "status": "declined",
+  "why": "Calc operator `%` (mod, and postfix percent) outside the subset"
+ },
+ "emacs-nan-err": {
+  "status": "declined",
+  "why": "division by zero: Calc keeps 1/0 symbolically"
+ },
+ "emacs-cookie-r": {
+  "status": "declined",
+  "why": "`<...>` in a field is a Calc date form: outside the subset (Org writes #ERROR into the cookie row)"
+ },
+ "emacs-vec-one-space": {
+  "status": "declined",
+  "why": "a one-element range whose field has spaces: Calc reads [2 3] as two elements; declined"
+ }
+}
