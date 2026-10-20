@@ -88,6 +88,8 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
         org_line_in_markdown: found.iter().any(|f| f.md_has_org_tblfm),
         ..Report::default()
     };
+    // One work budget for the whole command: every table, every pass.
+    let budget = formula::Budget::new();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut next = 0;
     for f in found
@@ -116,7 +118,7 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
             let mut last = Report::default();
             for _ in 0..passes {
                 let before = t.lines.clone();
-                last = formula::recalculate(&mut t, &formulas)?;
+                last = formula::recalculate_in(&mut t, &formulas, &budget)?;
                 if !last.skipped.is_empty() {
                     break;
                 }
@@ -149,6 +151,7 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
         }
     }
     out.extend(lines[next..].iter().map(|l| l.to_string()));
+    report.work_used = budget.used();
     Ok((out.join("\n"), report))
 }
 

@@ -142,6 +142,63 @@ fn b3_zero_padded_column_ranges_and_lhs() {
     );
 }
 
+/// The B3 descriptor cases computed by Emacs 31.1 / Org 9.8.7 with
+/// `tools/emacs-oracle.el` (2026-10-20). They are stored as templates to keep
+/// the repository small: `<P>` stands for 2,000 zeros then `1`, `<Z>` for
+/// 2,000 zeros. Expand them to rerun the oracle. The plugin must write
+/// exactly what Org wrote.
+const PADDED_DESCRIPTORS_EMACS: &[(&str, &str, &str)] = &[
+    (
+        "r2-b3-range",
+        "| 7 | 9 |\n#+TBLFM: @1$2=@1$<P>+1\n",
+        "| 7 | 8 |\n#+TBLFM: @1$2=@1$<P>+1\n",
+    ),
+    (
+        "r2-b3-rhs",
+        "| 7 | 9 |\n#+TBLFM: $2=$<P>+1\n",
+        "| 7 | 8 |\n#+TBLFM: $2=$<P>+1\n",
+    ),
+    (
+        "r2-b3-vsum",
+        "| 7 | 9 | 0 |\n#+TBLFM: $3=vsum($<P>..$2)\n",
+        "| 7 | 9 | 16 |\n#+TBLFM: $3=vsum($<P>..$2)\n",
+    ),
+    (
+        "r2-b3-lhs",
+        "| 7 | 9 |\n#+TBLFM: $<Z>2=$1+1\n",
+        "| 7 | 8 |\n#+TBLFM: $<Z>2=$1+1\n",
+    ),
+    (
+        "r2-b3-rowrange",
+        "| 7 | 9 |\n| 1 | 2 |\n#+TBLFM: @2$1=@<P>$1+1\n",
+        "| 7 | 9 |\n| 8 | 2 |\n#+TBLFM: @2$1=@<P>$1+1\n",
+    ),
+    (
+        "r2-b3-mode",
+        "| 7 | 9 |\n#+TBLFM: $2=$1/3;f<Z>2\n",
+        "| 7 | 2.33 |\n#+TBLFM: $2=$1/3;f<Z>2\n",
+    ),
+    (
+        "r2-b3-relcol",
+        "| 7 | 9 |\n#+TBLFM: $2=$-<P>+1\n",
+        "| 7 | 8 |\n#+TBLFM: $2=$-<P>+1\n",
+    ),
+];
+
+#[test]
+fn b3_padded_descriptors_match_emacs() {
+    let expand = |s: &str| {
+        s.replace("<P>", &padded())
+            .replace("<Z>", &"0".repeat(2000))
+    };
+    for (id, input, org) in PADDED_DESCRIPTORS_EMACS {
+        let (input, org) = (expand(input), expand(org));
+        let (out, report) = process_text(&input, Dialect::Org, Laps::Times(1)).expect("no abort");
+        assert!(report.skipped.is_empty(), "{id}: {:?}", report.skipped);
+        assert_eq!(out, org, "{id}");
+    }
+}
+
 // ---- Follow-up: row counts at or past 2^63 must not wrap (native builds)
 
 #[test]

@@ -48,10 +48,10 @@ fn re(cell: &'static OnceLock<Regex>, pat: &str) -> &'static Regex {
 /// are ignored, as Org ignores them; a repeated left side is an error.
 pub fn parse_tblfm(s: &str) -> Result<Vec<Stored>, Abort> {
     static ENTRY: OnceLock<Regex> = OnceLock::new();
-    let entry = re(
-        &ENTRY,
-        r"^(@[-+I<>0-9.$@]+|\$([_a-zA-Z0-9]+|[<>]+)) *= *(.*[^ \t])",
-    );
+    // `lhs = rhs`: the regex reads only the left-hand side and the `=`; the
+    // right-hand side is the rest without trailing blanks, as Org's
+    // `(.*[^ \t])` reads it (a capture over a long rest is slow).
+    let entry = re(&ENTRY, r"^(@[-+I<>0-9.$@]+|\$([_a-zA-Z0-9]+|[<>]+)) *= *");
     static SEP: OnceLock<Regex> = OnceLock::new();
     let sep = re(&SEP, r" *:: *");
     let mut out: Vec<Stored> = Vec::new();
@@ -59,6 +59,11 @@ pub fn parse_tblfm(s: &str) -> Result<Vec<Stored>, Abort> {
         let Some(c) = entry.captures(piece) else {
             continue;
         };
+        let rest = &piece[c.get(0).map_or(0, |m| m.end())..];
+        let rhs = rest.trim_end_matches([' ', '\t']);
+        if rhs.is_empty() || rhs.contains('\n') {
+            continue;
+        }
         let mut lhs = c.get(1).map_or("", |m| m.as_str()).to_string();
         // `$name=` (not a column number or `$<`/`$>`) names a field; Org
         // stores it under the bare name.
@@ -71,7 +76,7 @@ pub fn parse_tblfm(s: &str) -> Result<Vec<Stored>, Abort> {
                 lhs = n.to_string();
             }
         }
-        let rhs = c.get(3).map_or("", |m| m.as_str()).to_string();
+        let rhs = rhs.to_string();
         if out.iter().any(|f| f.lhs == lhs) {
             return abort(
                 Some(&format!("{lhs}={rhs}")),
@@ -101,6 +106,8 @@ pub struct Report {
     pub declined_tables: usize,
     /// A Markdown table followed by an Org `#+TBLFM:` line (not read).
     pub org_line_in_markdown: bool,
+    /// Work units the command used ([`MAX_WORK`]); for tests and calibration.
+    pub work_used: usize,
 }
 
 impl Report {
@@ -143,8 +150,36 @@ struct Engine<'a> {
     types: Vec<bool>, // true = hline
     dlines: Vec<usize>,
     ncol: usize,
-    /// Work done so far in this recalculation ([`MAX_WORK`]).
-    work: std::cell::Cell<usize>,
+    /// The command's work budget, shared by every table and pass.
+    budget: &'a Budget,
+}
+
+/// One command invocation's work budget ([`MAX_WORK`] units), shared by
+/// every table of the block and every recalculation pass.
+#[derive(Debug, Default)]
+pub struct Budget {
+    used: std::cell::Cell<usize>,
+}
+
+impl Budget {
+    pub fn new() -> Self {
+        Budget::default()
+    }
+
+    /// Add `units` of work; `false` once over [`MAX_WORK`].
+    pub fn charge(&self, units: usize) -> bool {
+        let total = self.used.get().saturating_add(units);
+        self.used.set(total);
+        total <= MAX_WORK
+    }
+
+    pub fn used(&self) -> usize {
+        self.used.get()
+    }
+
+    pub fn remaining(&self) -> usize {
+        MAX_WORK.saturating_sub(self.used.get())
+    }
 }
 
 const MAX_SUBSTITUTIONS: usize = 2000;
@@ -156,18 +191,32 @@ const MAX_SUBSTITUTIONS: usize = 2000;
 /// Fields one range reference may cover (the left-hand-side expansion has
 /// the same cap).
 pub const MAX_RANGE_FIELDS: usize = 100_000;
-/// Work one table's recalculation may do: one unit per field read through a
-/// reference, [`EVAL_WORK`] per evaluated field. Measured on the release
-/// guest under Node (2026-10-20): about 2.5 us per field read and 10-15 us
-/// per evaluation, so the cap stays near 125 ms, half the host's 250 ms
-/// invocation timeout.
+/// Work one command invocation may do, over every table of the block and
+/// every pass. A unit is about 2.5 us in the release guest under Node
+/// (2026-10-20), so the cap is near 125 ms, half the host's 250 ms
+/// invocation timeout; every cost below is charged at about twice its
+/// measured time. One unit per field read through a reference (and per 8
+/// fields of the row copied for each evaluation), [`EVAL_WORK`] per
+/// evaluated field, [`scan_units`] each time a formula's text is scanned or
+/// rewritten, and the Calc work of evaluation ([`calc::TICKS_PER_UNIT`]).
 pub const MAX_WORK: usize = 50_000;
-pub const EVAL_WORK: usize = 8;
+pub const EVAL_WORK: usize = 2;
+/// Whole-text passes over a formula before its references are substituted
+/// (flags, `$<`/`$>`, syntax checks, each kind of reference), charged up front.
+const PRE_SCANS: usize = 4;
+
+/// Work units for one scan or rewrite of `len` bytes of formula text: about
+/// 17 ns per byte on short text and 200 ns per byte past 2 KiB, where the
+/// regex engine needs its slower general matcher (measured on the release
+/// guest, 2026-10-20), charged at twice that.
+pub fn scan_units(len: usize) -> usize {
+    len / 64 + len.saturating_sub(2048) / 8 + 1
+}
 /// Length of one formula after its references are substituted.
 pub const MAX_EXPANDED_FORMULA: usize = 256 * 1024;
 
 impl<'a> Engine<'a> {
-    fn new(table: &'a mut Table) -> Result<Self, Abort> {
+    fn new(table: &'a mut Table, budget: &'a Budget) -> Result<Self, Abort> {
         let mut types: Vec<bool> = table
             .lines
             .iter()
@@ -193,7 +242,7 @@ impl<'a> Engine<'a> {
             types,
             dlines,
             ncol,
-            work: std::cell::Cell::new(0),
+            budget,
         })
     }
 
@@ -445,14 +494,17 @@ impl<'a> Engine<'a> {
     }
 }
 
-const WORK_REASON: &str = "the table needs more computation than the plugin allows in one run (budget: 50000 field reads in total)";
+const WORK_REASON: &str = "the formulas need more computation than the plugin allows in one run (budget: 50000 units for the whole block)";
 
 impl Engine<'_> {
     /// Add `units` of work; `false` once over [`MAX_WORK`].
     fn charge(&self, units: usize) -> bool {
-        let total = self.work.get().saturating_add(units);
-        self.work.set(total);
-        total <= MAX_WORK
+        self.budget.charge(units)
+    }
+
+    /// Charge one scan or rewrite of `text`.
+    fn charge_scan(&self, text: &str) -> bool {
+        self.charge(scan_units(text.len()))
     }
 }
 
@@ -666,6 +718,9 @@ impl<'a> Engine<'a> {
         if !self.charge(EVAL_WORK) {
             return Ok(EvalResult::Skip(WORK_REASON.into()));
         }
+        if !self.charge(scan_units(rhs.len()).saturating_mul(PRE_SCANS)) {
+            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        }
         let p = match prepare(rhs) {
             Ok(p) => p,
             Err(why) => return Ok(EvalResult::Skip(why)),
@@ -678,6 +733,9 @@ impl<'a> Engine<'a> {
         }
         let formula = handle_first_last(&p.expr, self.dlines.len(), self.ncol, f)?;
         let mut fields: Vec<String> = self.fields(line).to_vec();
+        if !self.charge(fields.len() / 8) {
+            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        }
         if p.numbers {
             for x in fields.iter_mut() {
                 if x.chars().any(|c| !c.is_whitespace()) {
@@ -724,6 +782,9 @@ impl<'a> Engine<'a> {
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
             }
+            if !self.charge_scan(&form) {
+                return Ok(EvalResult::Skip(WORK_REASON.into()));
+            }
             let v = self.get_range(m.as_str(), line, n0 as i64, f)?;
             let rpl = match make_reference(&v, p.keep_empty, p.numbers) {
                 Ok(r) => r,
@@ -766,6 +827,9 @@ impl<'a> Engine<'a> {
                     ),
                 );
             }
+            if !self.charge((b - a) as usize) || !self.charge_scan(&form) {
+                return Ok(EvalResult::Skip(WORK_REASON.into()));
+            }
             let slice = fields[a as usize..b as usize].to_vec();
             let rpl = match make_reference(&RangeVal::Many(slice), p.keep_empty, p.numbers) {
                 Ok(r) => r,
@@ -787,6 +851,9 @@ impl<'a> Engine<'a> {
             guard += 1;
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
+            }
+            if !self.charge(1) || !self.charge_scan(&form) {
+                return Ok(EvalResult::Skip(WORK_REASON.into()));
             }
             let raw = c.get(1).map_or("0", |m| m.as_str());
             let Some(mut n) = printf::small_int(raw) else {
@@ -822,7 +889,15 @@ impl<'a> Engine<'a> {
             return Ok(EvalResult::Skip("dates and times are not supported".into()));
         }
         let num_only = p.numbers && !p.keep_empty;
-        let ev = match calc::calc_eval(&form, p.modes, num_only) {
+        if !self.charge_scan(&form) {
+            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        }
+        let (ev, used) =
+            calc::calc_eval_budget(&form, p.modes, num_only, self.budget.remaining() as u64);
+        if !self.charge(used as usize) {
+            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        }
+        let ev = match ev {
             Ok(v) => v,
             Err(Outcome::CalcError(_)) => return Ok(EvalResult::Error),
             Err(Outcome::Unsupported(why)) => return Ok(EvalResult::Skip(why)),
@@ -908,8 +983,18 @@ impl<'a> Engine<'a> {
 /// formula leaves a cell Org would have changed, so any later formula could
 /// compute from the wrong value (review finding F1).
 pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abort> {
+    recalculate_in(table, formulas, &Budget::new())
+}
+
+/// [`recalculate`] charging `budget`, which the caller shares across every
+/// table and pass of one command invocation.
+pub fn recalculate_in(
+    table: &mut Table,
+    formulas: &[Stored],
+    budget: &Budget,
+) -> Result<Report, Abort> {
     let mut report = Report::default();
-    let mut eng = Engine::new(table)?;
+    let mut eng = Engine::new(table, budget)?;
     let nrows = eng.dlines.len();
     let ncol = eng.ncol;
     let mut eqlist: Vec<Stored> = formulas.to_vec();
@@ -923,6 +1008,10 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
     for e in &eqlist {
         let text = e.text();
         let f = Some(text.as_str());
+        if !budget.charge(scan_units(e.rhs.len() + e.lhs.len()).saturating_mul(3)) {
+            report.skip(&text, WORK_REASON);
+            return Ok(report);
+        }
         let rhs = handle_first_last(&e.rhs, nrows, ncol, &text)?;
         let lhs = if re(&HLINE_LHS, r"^@-?I+").is_match(&e.lhs) {
             return abort(f, "can't assign to an hline-relative reference");
@@ -959,16 +1048,20 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
         }
     }
 
-    // Expand field formulas over their left-hand ranges.
-    let mut expanded: Vec<(usize, usize, String, String)> = Vec::new(); // (dline, col, rhs, text)
+    // Expand field formulas over their left-hand ranges. Targets refer to
+    // their formula by index into `field_eqs`: the right-hand side is shared,
+    // not copied per target.
+    let mut expanded: Vec<(usize, usize, usize)> = Vec::new(); // (dline, col, formula)
+    let mut planned: usize = 0;
     let thisline = eng.table.lines.len().saturating_sub(1);
     static ONE_FIELD: OnceLock<Regex> = OnceLock::new();
     static ROW: OnceLock<Regex> = OnceLock::new();
     static ABS_FIELD: OnceLock<Regex> = OnceLock::new();
     let abs_field = re(&ABS_FIELD, r"^@([1-9][0-9]*)\$([1-9][0-9]*)$");
-    for (lhs, rhs, text) in &field_eqs {
+    for (eq, (lhs, rhs, text)) in field_eqs.iter().enumerate() {
         let f = Some(text.as_str());
         let mut targets: Vec<String> = Vec::new();
+        let mut cells: Vec<(usize, usize)> = Vec::new();
         if re(&ONE_FIELD, r"^@[-+0-9]+\$-?[0-9]+$").is_match(lhs) {
             targets.push(lhs.clone());
         } else if re(&ROW, r"^@[0-9]+$").is_match(lhs) {
@@ -998,9 +1091,16 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             if (r2 + 1).saturating_sub(r1) as i64 * (lc - fc + 1) > MAX_RANGE_FIELDS as i64 {
                 return abort(f, format!("the range {lhs} is too large"));
             }
+            if expanded.len() + (r2 + 1 - r1) * (lc - fc + 1) as usize > MAX_RANGE_FIELDS {
+                report.skip(
+                    text,
+                    &format!("the left-hand sides cover more than {MAX_RANGE_FIELDS} fields"),
+                );
+                return Ok(report);
+            }
             for r in r1..=r2 {
                 for c in fc..=lc {
-                    targets.push(format!("@{r}${c}"));
+                    cells.push((r, c as usize));
                 }
             }
         }
@@ -1021,11 +1121,39 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             if r == 0 || r > nrows {
                 return abort(f, format!("invalid row number in {t}"));
             }
-            expanded.push((r, col, rhs.clone(), text.clone()));
+            cells.push((r, col));
         }
+        if expanded.len() + cells.len() > MAX_RANGE_FIELDS {
+            report.skip(
+                text,
+                &format!("the left-hand sides cover more than {MAX_RANGE_FIELDS} fields"),
+            );
+            return Ok(report);
+        }
+        // Every target evaluates the whole right-hand side, at least
+        // EVAL_WORK plus one scan of it: refuse up front, before any target
+        // runs, when the block's remaining budget cannot cover them all.
+        planned = planned.saturating_add(
+            cells
+                .len()
+                .saturating_mul(EVAL_WORK + scan_units(rhs.len()) * PRE_SCANS),
+        );
+        if planned > budget.remaining() {
+            report.skip(
+                text,
+                &format!(
+                    "{WORK_REASON}: {} target fields times a {}-character formula",
+                    cells.len(),
+                    rhs.len()
+                ),
+            );
+            return Ok(report);
+        }
+        expanded.extend(cells.into_iter().map(|(r, c)| (r, c, eq)));
     }
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
-    for (r, c, _, text) in &expanded {
+    for (r, c, eq) in &expanded {
+        let text = &field_eqs[*eq].2;
         if !seen.insert((*r, *c)) {
             return abort(
                 Some(text),
@@ -1035,7 +1163,7 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
     }
     let untouchable: HashSet<(usize, usize)> = expanded
         .iter()
-        .map(|(r, c, _, _)| (eng.dlines[r - 1], *c))
+        .map(|(r, c, _)| (eng.dlines[r - 1], *c))
         .collect();
 
     // Which rows the column formulas run on.
@@ -1084,7 +1212,7 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             }
         }
     }
-    if let Some((_, _, _, text)) = expanded.first() {
+    if let Some(text) = expanded.first().map(|(_, _, eq)| &field_eqs[*eq].2) {
         // Org checks "Missing columns" against a column count it takes at
         // the cursor position, which moves between field formulas; with rows
         // of different lengths that is not reproduced (review finding F5).
@@ -1098,7 +1226,8 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
         }
     }
     let width = eng.dlines.first().map_or(0, |&l| eng.fields(l).len());
-    for (r, c, rhs, text) in &expanded {
+    for (r, c, eq) in &expanded {
+        let (_, rhs, text) = &field_eqs[*eq];
         let l = eng.dlines[r - 1];
         if *c > 1000 {
             return abort(Some(text), "formula column target too large");

@@ -323,8 +323,12 @@ fn f9_padding_a_compact_ragged_table_is_refused_before_rendering() {
 /// (13 flag sets x 4 widths x 6 precisions x 11 conversions x 25 values,
 /// plus literal-text formats) run through Emacs 31.1 by
 /// `tools/emacs-printf-oracle.el`. On the full grid the plugin matched
-/// 29,179 pairs exactly and declined the other 56,846 (round 1). Every
-/// sampled pair must match or be declined.
+/// 29,179 pairs exactly and declined the other 56,846 (rounds 1 and 2).
+/// The fixture keeps a deterministic 1,549-pair subset (every third pair of
+/// the round-1 sample, plus one pair of each conversion/flag-set/precision/
+/// declined combination that would otherwise be missing), so the published
+/// repository stays small; regenerate the grid with the oracle to rerun it in
+/// full. Every sampled pair must match or be declined.
 #[test]
 fn f6_printf_matches_emacs_or_declines() {
     use tine_plugin_table_formulas::printf::{format_one, string_to_number};
@@ -353,5 +357,6 @@ fn f6_printf_matches_emacs_or_declines() {
         wrong.len(),
         wrong.join("\n")
     );
-    assert!(matched >= 3000, "only {matched} accepted cases");
+    // 1,341 of the 1,549 pairs are accepted (3,000 of 4,510 before the cut).
+    assert!(matched >= 1300, "only {matched} accepted cases");
 }

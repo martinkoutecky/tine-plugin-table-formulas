@@ -82,7 +82,6 @@ fn org_mode_corpus() {
         "org-table-tests-manual.json",
         "emacs-oracle.json",
         "emacs-oracle-r1.json",
-        "emacs-oracle-r2.json",
     ] {
         let v = load(file);
         revisions.push(v["revision"].as_str().unwrap_or("?").to_string());

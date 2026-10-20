@@ -1,6 +1,9 @@
 ;;; -*- lexical-binding: t -*-
 (require 'org) (require 'org-table) (require 'json)
-(let* ((cases (with-temp-buffer (insert-file-contents (car command-line-args-left)) (json-parse-buffer :object-type 'alist :array-type 'list)))
+;; The input is a list of {id, input} cases, or a fixture file written by
+;; this script ({revision, cases}), whose cases are recomputed.
+(let* ((parsed (with-temp-buffer (insert-file-contents (car command-line-args-left)) (json-parse-buffer :object-type 'alist :array-type 'list)))
+       (cases (if (assq 'cases parsed) (alist-get 'cases parsed) parsed))
        (out '()))
   (dolist (c cases)
     (let* ((id (alist-get 'id c)) (input (alist-get 'input c)) res err)

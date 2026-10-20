@@ -897,6 +897,39 @@ fn add_values(a: &Value, b: &Value, prec: i64) -> CResult<Value> {
 
 pub struct Eval {
     pub modes: Modes,
+    /// Work done so far, in ticks ([`TICKS_PER_UNIT`] make one unit of the
+    /// formula engine's per-command budget).
+    ticks: std::cell::Cell<u64>,
+    /// Ticks this evaluation may use before it is refused.
+    max_ticks: u64,
+}
+
+/// Calc work is counted in ticks: [`NODE_TICKS`] per syntax node, and for
+/// arithmetic the operands' sizes in 64-bit limbs, added for `+`, `-` and
+/// comparisons and multiplied for `*` and `/` (schoolbook cost). A power is
+/// charged as the square of its result's size, reading a literal and
+/// printing the result as four times the square of their size (decimal
+/// conversion is quadratic). [`TICKS_PER_UNIT`] ticks are one unit of the
+/// formula engine's budget (about 2.5 us in the release guest); measured
+/// there (2026-10-20), one unit's time does about 1,000 ticks of this work,
+/// so it is charged at about twice its time.
+pub const TICKS_PER_UNIT: u64 = 512;
+const NODE_TICKS: u64 = 64;
+
+fn limbs_num(n: &Num) -> u64 {
+    match n {
+        Num::Int(i) => i.bits() / 64 + 1,
+        Num::Float { m, .. } => m.bits() / 64 + 1,
+    }
+}
+
+fn limbs(v: &Value) -> u64 {
+    match v {
+        Value::Num(n) => limbs_num(n),
+        Value::Vec(items) => items.iter().map(limbs).fold(1u64, u64::saturating_add),
+        Value::Str(s) => s.len() as u64 / 8 + 1,
+        _ => 1,
+    }
 }
 
 fn truth(v: &Value) -> CResult<bool> {
@@ -921,9 +954,25 @@ impl Eval {
         self.modes.prec
     }
 
+    /// Charge `ticks` of work; refuse once over the budget.
+    fn charge(&self, ticks: u64) -> CResult<()> {
+        let t = self.ticks.get().saturating_add(ticks);
+        self.ticks.set(t);
+        if t > self.max_ticks {
+            return unsupported(WORK_MSG);
+        }
+        Ok(())
+    }
+
     pub fn eval(&self, e: &Expr) -> CResult<Value> {
+        self.charge(NODE_TICKS)?;
         match e {
-            Expr::Num(s) => Ok(Value::Num(read_number(s, self.prec())?)),
+            Expr::Num(s) => {
+                // Reading decimal digits is quadratic in their number.
+                let l = s.len() as u64 / 19 + 1;
+                self.charge(l.saturating_mul(l).saturating_mul(4))?;
+                Ok(Value::Num(read_number(s, self.prec())?))
+            }
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Sym(name) => {
                 match name.as_str() {
@@ -991,6 +1040,24 @@ impl Eval {
         }
         let x = self.eval(a)?;
         let y = self.eval(b)?;
+        let (lx, ly) = (limbs(&x), limbs(&y));
+        let cost = if op == "^" {
+            // The result has about bits(x) * y bits (pow_int refuses big
+            // ones before computing them).
+            let (bits, e) = match (&x, &y) {
+                (Value::Num(Num::Int(b)), Value::Num(Num::Int(n))) => {
+                    (b.bits(), n.to_u64().unwrap_or(u64::MAX))
+                }
+                _ => (64, 1),
+            };
+            let r = (bits.saturating_mul(e) / 64 + 1).min(1 << 20);
+            r.saturating_mul(r)
+        } else if op == "*" || op == "/" {
+            lx.saturating_mul(ly).saturating_add(lx).saturating_add(ly)
+        } else {
+            lx.saturating_add(ly)
+        };
+        self.charge(cost)?;
         if COMPARISONS.contains(&op) {
             let bool_val =
                 |t: bool| Value::Num(Num::Int(if t { BigInt::one() } else { BigInt::zero() }));
@@ -1045,6 +1112,14 @@ impl Eval {
         args.iter().for_each(|a| flatten(a, &mut items));
         let mut acc: Option<Value> = None;
         for it in items {
+            let la = acc.as_ref().map_or(1, limbs);
+            let lb = limbs(&it);
+            let op_ticks = if add_not_mul {
+                la.saturating_add(lb)
+            } else {
+                la.saturating_mul(lb)
+            };
+            self.charge(op_ticks.saturating_add(NODE_TICKS))?;
             acc = Some(match (acc, it) {
                 (None, v @ (Value::Num(_) | Value::Nan | Value::Inf(_))) => v,
                 (Some(a), b) if add_not_mul => add_values(&a, &b, inner)?,
@@ -1185,9 +1260,36 @@ impl Eval {
 /// Evaluate a Calc expression string under `modes`. With `num_only`
 /// (`calc-eval ... 'num`), a non-numeric result is a Calc error.
 pub fn calc_eval(src: &str, modes: Modes, num_only: bool) -> CResult<String> {
+    calc_eval_budget(src, modes, num_only, u64::MAX / TICKS_PER_UNIT).0
+}
+
+/// The reason given when an evaluation runs out of its work budget.
+pub const WORK_MSG: &str = "the formulas need more computation than the plugin allows in one run";
+
+/// [`calc_eval`] with a budget of `max_units` engine units; also returns the
+/// units used (rounded up), whether or not the evaluation finished.
+pub fn calc_eval_budget(
+    src: &str,
+    modes: Modes,
+    num_only: bool,
+    max_units: u64,
+) -> (CResult<String>, u64) {
+    let ev = Eval {
+        modes,
+        ticks: std::cell::Cell::new(0),
+        max_ticks: max_units.saturating_mul(TICKS_PER_UNIT),
+    };
+    let r = calc_run(&ev, src, num_only);
+    (r, ev.ticks.get().div_ceil(TICKS_PER_UNIT))
+}
+
+fn calc_run(ev: &Eval, src: &str, num_only: bool) -> CResult<String> {
+    let modes = ev.modes;
     let expr = parse(src)?;
-    let ev = Eval { modes };
     let v = ev.eval(&expr)?;
+    // Printing a big integer in decimal is quadratic in its size.
+    let l = limbs(&v);
+    ev.charge(l.saturating_mul(l).saturating_mul(4))?;
     if num_only && !matches!(v, Value::Num(_)) {
         return match v {
             Value::Sym(_) | Value::Nan | Value::Inf(_) => calc_error("number expected"),
