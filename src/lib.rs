@@ -62,15 +62,32 @@ pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
 }
 
 /// The text with its formula tables recalculated (`laps`) and aligned.
+///
+/// A table with a formula the plugin cannot evaluate exactly is left byte
+/// for byte as it was (not even aligned), and the report names the formula:
+/// a partial recalculation could write values Org would not (review F1).
 pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, Report), Abort> {
     let lines: Vec<&str> = raw.split('\n').collect();
     let bare: Vec<&str> = lines.iter().map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
     let found = table::find_tables(&bare, dialect);
-    let mut report = Report::default();
+    let mut report = Report {
+        org_line_in_markdown: found.iter().any(|f| f.md_has_org_tblfm),
+        ..Report::default()
+    };
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut next = 0;
     for f in found.iter().filter(|f| f.tblfm.is_some() || laps == Laps::AlignOnly) {
         out.extend(lines[next..f.start].iter().map(|l| l.to_string()));
+        next = f.end;
+        let original = || lines[f.start..f.end].iter().map(|l| l.to_string());
+        if let Some(why) = &f.decline {
+            if let Some(tblfm) = &f.tblfm {
+                report.skip(tblfm, why);
+                report.declined_tables += 1;
+            }
+            out.extend(original());
+            continue;
+        }
         let mut t: Table = table::parse_table(&bare[f.start..f.end], dialect);
         if laps != Laps::AlignOnly {
             let formulas = formula::parse_tblfm(f.tblfm.as_deref().unwrap_or(""))?;
@@ -83,22 +100,33 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
             for _ in 0..passes {
                 let before = t.lines.clone();
                 last = formula::recalculate(&mut t, &formulas)?;
+                if !last.skipped.is_empty() {
+                    break;
+                }
                 if laps == Laps::Iterate && t.lines == before {
                     converged = true;
                     break;
                 }
             }
-            report.skipped.extend(last.skipped);
+            if !last.skipped.is_empty() {
+                report.skipped.extend(last.skipped);
+                report.declined_tables += 1;
+                out.extend(original());
+                continue;
+            }
             report.errors.extend(last.errors);
             if !converged {
                 return Err(Abort { formula: None, message: "no convergence after 10 iterations".into() });
             }
         }
+        let rendered = t.render_checked(MAX_RAW_UTF16).ok_or_else(|| Abort {
+            formula: None,
+            message: "the aligned table would exceed Tine's 128 KiB block limit".into(),
+        })?;
         let cr = lines[f.start..f.end].iter().any(|l| l.ends_with('\r'));
-        for l in t.render() {
+        for l in rendered {
             out.push(if cr { format!("{l}\r") } else { l });
         }
-        next = f.end;
     }
     out.extend(lines[next..].iter().map(|l| l.to_string()));
     Ok((out.join("\n"), report))
@@ -115,30 +143,37 @@ fn notice(message: String, level: NoticeLevel) -> Effect {
     Effect::Notice { message: clip(message), level: Some(level) }
 }
 
+const ORG_LINE_HINT: &str =
+    "In Markdown, write the formulas as `<!-- TBLFM: $3=$1*$2 -->` under the table (the `#+TBLFM:` line is not read).";
+
 fn report_notice(report: &Report, tables: usize, changed: bool) -> Option<Effect> {
+    let hint = if report.org_line_in_markdown { format!(" {ORG_LINE_HINT}") } else { String::new() };
     if report.errors.is_empty() && report.skipped.is_empty() {
-        return if changed {
+        return if changed && hint.is_empty() {
             None
+        } else if changed {
+            Some(notice(hint.trim_start().to_string(), NoticeLevel::Info))
         } else {
-            Some(notice(
-                if tables == 1 { "Table is up to date.".into() } else { "Tables are up to date.".into() },
-                NoticeLevel::Info,
-            ))
+            let up = if tables == 1 { "Table is up to date." } else { "Tables are up to date." };
+            Some(notice(format!("{up}{hint}"), NoticeLevel::Info))
         };
     }
     let mut msg = String::new();
+    if !report.skipped.is_empty() {
+        let list: Vec<String> =
+            report.skipped.iter().map(|s| format!("`{}` ({})", s.formula, s.reason)).collect();
+        let what = if report.declined_tables == 1 {
+            "1 table was left unchanged".to_string()
+        } else {
+            format!("{} tables were left unchanged", report.declined_tables)
+        };
+        msg.push_str(&format!("{what}, because the plugin cannot match Org on {}. ", list.join("; ")));
+    }
     if !report.errors.is_empty() {
         let list: Vec<String> = report.errors.iter().map(|e| format!("`{e}`")).collect();
         msg.push_str(&format!("#ERROR from {}. ", list.join(", ")));
     }
-    if !report.skipped.is_empty() {
-        let list: Vec<String> =
-            report.skipped.iter().map(|s| format!("`{}` ({})", s.formula, s.reason)).collect();
-        msg.push_str(&format!(
-            "Not evaluated, cells kept: {}. Cells that depend on them may be stale.",
-            list.join("; ")
-        ));
-    }
+    msg.push_str(hint.trim_start());
     Some(notice(msg.trim_end().to_string(), NoticeLevel::Warning))
 }
 
@@ -162,9 +197,7 @@ fn handle(event: &Event) -> Result<Vec<Effect>, String> {
         BlockResult::NoFormulas { org_line_in_markdown } => {
             let hint = match dialect {
                 Dialect::Org => "Add a `#+TBLFM: $3=$1*$2` line under the table.",
-                Dialect::Markdown if org_line_in_markdown => {
-                    "In Markdown, write the formulas as `<!-- TBLFM: $3=$1*$2 -->` under the table (the `#+TBLFM:` line is not read)."
-                }
+                Dialect::Markdown if org_line_in_markdown => ORG_LINE_HINT,
                 Dialect::Markdown => "Add a `<!-- TBLFM: $3=$1*$2 -->` line under the table.",
             };
             Ok(vec![notice(format!("No table formulas in this block. {hint}"), NoticeLevel::Info)])

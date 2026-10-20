@@ -5,17 +5,43 @@
 //! functions (and checked against the C library conventions they follow);
 //! no Emacs code is copied.
 
-/// An Emacs Lisp number: a fixnum/bignum (we keep i128) or a double.
-#[derive(Clone, Copy, Debug, PartialEq)]
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive, Zero};
+
+/// Integers with more decimal digits than this are not converted: the plugin
+/// declines instead (malformed-input budget; Emacs itself has bignums).
+pub const MAX_INT_DIGITS: usize = 2_000;
+
+/// An Emacs Lisp number: a fixnum/bignum (exact) or a double.
+#[derive(Clone, Debug, PartialEq)]
 pub enum LispNum {
-    Int(i128),
+    Int(BigInt),
     Float(f64),
+}
+
+impl LispNum {
+    pub fn int(v: i64) -> LispNum {
+        LispNum::Int(BigInt::from(v))
+    }
+}
+
+/// A column number, mode digit count or similar small integer written as
+/// `[-+]?[0-9]+`: read with `string-to-number` semantics but saturated to
+/// +-1_000_000, which is far outside every table and every budget.
+pub fn small_int(s: &str) -> i64 {
+    match string_to_number(s) {
+        Some(LispNum::Int(v)) => v.to_i64().unwrap_or(if v.is_negative() { i64::MIN } else { i64::MAX }).clamp(-1_000_000, 1_000_000),
+        _ => 0,
+    }
 }
 
 /// `(string-to-number s)` in base 10: leading blanks are skipped, the longest
 /// numeric prefix is read, and anything else gives 0. A number without a
-/// fraction or exponent is an integer (`"3."` reads as the integer 3).
-pub fn string_to_number(s: &str) -> LispNum {
+/// fraction or exponent is an integer (`"3."` reads as the integer 3), of any
+/// size, as Emacs bignums are. `None` means the plugin cannot reproduce the
+/// value exactly (Emacs's `1.0e+INF`/`0.0e+NaN` syntax, or an integer above
+/// [`MAX_INT_DIGITS`]); callers decline.
+pub fn string_to_number(s: &str) -> Option<LispNum> {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
@@ -49,7 +75,7 @@ pub fn string_to_number(s: &str) -> LispNum {
         }
     }
     if int_digits == 0 && frac_digits == 0 {
-        return LispNum::Int(0);
+        return Some(LispNum::int(0));
     }
     let mut end = if is_float { i } else { end_int };
     if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
@@ -64,19 +90,23 @@ pub fn string_to_number(s: &str) -> LispNum {
         if j > d0 {
             is_float = true;
             end = j;
+        } else if s[d0..].starts_with("INF") || s[d0..].starts_with("NaN") {
+            // Emacs reads `1.0e+INF` and `0.0e+NaN` as an infinity / NaN.
+            return None;
         }
     }
     let text = &s[start..end];
     if is_float {
         // "3.e5" is not a Rust float literal; drop a dot with no fraction.
         let cleaned = text.replace(".e", "e").replace(".E", "E");
-        LispNum::Float(cleaned.parse::<f64>().unwrap_or(0.0))
+        Some(LispNum::Float(cleaned.parse::<f64>().unwrap_or(0.0)))
     } else {
-        let t = text.trim_end_matches('.');
-        match t.parse::<i128>() {
-            Ok(v) => LispNum::Int(v),
-            Err(_) => LispNum::Float(t.parse::<f64>().unwrap_or(0.0)),
+        if int_digits > MAX_INT_DIGITS {
+            return None;
         }
+        let t = text.trim_end_matches('.');
+        let t = t.strip_prefix('+').unwrap_or(t);
+        t.parse::<BigInt>().ok().map(LispNum::Int)
     }
 }
 
@@ -106,34 +136,46 @@ fn strip_trailing_zeros(s: &str) -> String {
     }
 }
 
-/// C-style `%g`.
+/// C-style `%g` (`alt` is the `#` flag: trailing zeros and the point stay).
 fn fmt_g(x: f64, p: usize, alt: bool, upper: bool) -> String {
     let p = if p == 0 { 1 } else { p };
-    if x == 0.0 {
-        let s = if alt { format!("{:.*}", p - 1, 0.0) } else { "0".to_string() };
-        return if x.is_sign_negative() { format!("-{s}") } else { s };
-    }
-    let probe = format!("{:.*e}", p - 1, x);
-    let exp: i64 = probe.split_once('e').and_then(|(_, e)| e.parse().ok()).unwrap_or(0);
-    let out = if exp < -4 || exp >= p as i64 {
-        fmt_e(x, p - 1, upper)
+    let out = if x == 0.0 {
+        format!("{:.*}", p - 1, x)
     } else {
-        format!("{:.*}", (p as i64 - 1 - exp).max(0) as usize, x)
+        let probe = format!("{:.*e}", p - 1, x);
+        let exp: i64 = probe.split_once('e').and_then(|(_, e)| e.parse().ok()).unwrap_or(0);
+        if exp < -4 || exp >= p as i64 {
+            fmt_e(x, p - 1, upper)
+        } else {
+            format!("{:.*}", (p as i64 - 1 - exp).max(0) as usize, x)
+        }
     };
     if alt {
-        out
+        force_point(&out)
     } else {
         strip_trailing_zeros(&out)
+    }
+}
+
+/// The `#` flag's "always a decimal point" for `%e`/`%g`: `1e+00` -> `1.e+00`.
+fn force_point(s: &str) -> String {
+    if s.contains('.') {
+        return s.to_string();
+    }
+    match s.find(['e', 'E']) {
+        Some(p) => format!("{}.{}", &s[..p], &s[p..]),
+        None => format!("{s}."),
     }
 }
 
 /// Emacs `number-to-string`: integers plainly; floats with the shortest
 /// `%.Ng` (N from 15) that reads back exactly, plus `.0` when that text has
 /// neither a dot nor an exponent.
-pub fn number_to_string(n: LispNum) -> String {
+pub fn number_to_string(n: &LispNum) -> String {
     match n {
         LispNum::Int(i) => i.to_string(),
         LispNum::Float(x) => {
+            let x = *x;
             if x.is_nan() {
                 return if x.is_sign_negative() { "-0.0e+NaN".into() } else { "0.0e+NaN".into() };
             }
@@ -160,12 +202,30 @@ pub enum FormatError {
     /// More than one `%` conversion: Org would call `format` with too few
     /// arguments, an Emacs error.
     TooManySpecs,
-    /// A conversion we do not implement (`%c`, `%S`...).
+    /// A conversion, flag or precision we do not reproduce exactly (`%c`,
+    /// `%S`, `%+x`, `%.3s`...).
     Unsupported(String),
 }
 
+fn unsupported<T>(why: impl Into<String>) -> Result<T, FormatError> {
+    Err(FormatError::Unsupported(why.into()))
+}
+
+/// Integers up to 2^53 convert to a double exactly; beyond that the plugin
+/// does not reproduce Emacs's bignum-to-float rounding and declines.
+const EXACT_FLOAT_INT: i64 = 1 << 53;
+
 /// Emacs `(format fmt n)` for a format with at most one conversion.
-pub fn format_one(fmt: &str, n: LispNum) -> Result<String, FormatError> {
+///
+/// Every flag/precision combination accepted here was checked against Emacs
+/// 31.1 (`tools/emacs-printf-oracle.el`); anything else is declined:
+/// * `d i`: flags `- + space 0`, width, precision (minimum digits; `%.0d` of
+///   0 is empty, as in C);
+/// * `o x X`: flags `- 0 #`, width, precision; a negative value is printed
+///   with a minus sign (Emacs's default, `binary-as-unsigned` nil);
+/// * `f e E g G`: flags `- + space 0 #`, width, precision;
+/// * `s`: flag `-` and width, no precision.
+pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
     let chars: Vec<char> = fmt.chars().collect();
     let mut out = String::new();
     let mut used = false;
@@ -183,7 +243,8 @@ pub fn format_one(fmt: &str, n: LispNum) -> Result<String, FormatError> {
             i += 1;
             continue;
         }
-        // Emacs allows a field number `N$`; not supported here.
+        // Emacs allows a field number `N$`; not supported here (the `$`
+        // ends up as an unknown conversion).
         let (mut minus, mut plus, mut space, mut zero, mut alt) = (false, false, false, false, false);
         while i < chars.len() && "-+ 0#".contains(chars[i]) {
             match chars[i] {
@@ -211,78 +272,100 @@ pub fn format_one(fmt: &str, n: LispNum) -> Result<String, FormatError> {
             precision = Some(p);
         }
         if width > 1000 || precision.is_some_and(|p| p > 100) {
-            return Err(FormatError::Unsupported("a huge width or precision".into()));
+            return unsupported("a huge width or precision");
         }
         let Some(&conv) = chars.get(i) else {
-            return Err(FormatError::Unsupported("a format ending in `%`".into()));
+            return unsupported("a format ending in `%`");
         };
         i += 1;
         if used {
             return Err(FormatError::TooManySpecs);
         }
         used = true;
-        let as_f = match n {
-            LispNum::Int(v) => v as f64,
-            LispNum::Float(x) => x,
-        };
-        let as_i = match n {
-            LispNum::Int(v) => v,
-            LispNum::Float(x) => {
-                if !x.is_finite() || x.abs() > 1e30 {
-                    return Err(FormatError::Unsupported("an integer conversion of a huge float".into()));
+        let (neg, radix_prefix, body) = match conv {
+            'd' | 'i' | 'o' | 'x' | 'X' => {
+                let integer_flag_ok = match conv {
+                    'd' | 'i' => !alt,
+                    _ => !plus && !space,
+                };
+                if !integer_flag_ok {
+                    return unsupported(format!("these flags with `%{conv}`"));
                 }
-                x.trunc() as i128
-            }
-        };
-        let (neg, body) = match conv {
-            'd' | 'i' => {
-                let mut b = as_i.unsigned_abs().to_string();
+                let v: BigInt = match n {
+                    LispNum::Int(v) => v.clone(),
+                    LispNum::Float(x) => {
+                        if !x.is_finite() || x.abs() > 1e30 {
+                            return unsupported("an integer conversion of a huge float");
+                        }
+                        if precision.is_some() {
+                            // Emacs prints a float's integer part without C's
+                            // precision rule (`%.0d` of 0.5 is `0`).
+                            return unsupported(format!("a precision with `%{conv}` of a fraction"));
+                        }
+                        BigInt::from(x.trunc() as i128)
+                    }
+                };
+                let a = v.abs();
+                let mut b = if precision == Some(0) && a.is_zero() {
+                    String::new()
+                } else {
+                    match conv {
+                        'd' | 'i' => a.to_str_radix(10),
+                        'o' => a.to_str_radix(8),
+                        'x' => a.to_str_radix(16),
+                        _ => a.to_str_radix(16).to_ascii_uppercase(),
+                    }
+                };
                 if let Some(p) = precision {
                     if b.len() < p {
                         b = format!("{}{b}", "0".repeat(p - b.len()));
                     }
                 }
-                (as_i < 0, b)
-            }
-            'o' | 'x' | 'X' => {
-                let a = as_i.unsigned_abs();
-                let mut b = match conv {
-                    'o' => format!("{a:o}"),
-                    'x' => format!("{a:x}"),
-                    _ => format!("{a:X}"),
-                };
-                if alt && a != 0 {
-                    b = match conv {
-                        'o' => format!("0{b}"),
-                        'x' => format!("0x{b}"),
-                        _ => format!("0X{b}"),
-                    };
+                let mut radix_prefix = "";
+                if alt {
+                    match conv {
+                        'o' if !b.starts_with('0') => b = format!("0{b}"),
+                        'x' if !a.is_zero() => radix_prefix = "0x",
+                        'X' if !a.is_zero() => radix_prefix = "0X",
+                        _ => {}
+                    }
                 }
-                (as_i < 0, b)
+                (v.is_negative(), radix_prefix, b)
             }
-            'f' | 'e' | 'E' | 'g' | 'G' => {
+            // Emacs has no `%E` or `%G` (it signals an error).
+            'f' | 'e' | 'g' => {
+                if alt && conv == 'g' {
+                    // Emacs 31.1 gives `1.e+05` for `%#.5g` of 99999.5
+                    // where C gives `1.0000e+05`; not reproduced.
+                    return unsupported("the `#` flag with `%g`");
+                }
+                let as_f = match n {
+                    LispNum::Int(v) => match v.to_i64() {
+                        Some(k) if k.abs() <= EXACT_FLOAT_INT => k as f64,
+                        _ => return unsupported("a float conversion of an integer above 2^53"),
+                    },
+                    LispNum::Float(x) => *x,
+                };
                 if !as_f.is_finite() {
-                    return Err(FormatError::Unsupported("formatting a non-finite number".into()));
+                    return unsupported("formatting a non-finite number");
                 }
                 let p = precision.unwrap_or(6);
                 let a = as_f.abs();
                 let mut b = match conv {
                     'f' => format!("{:.*}", p, a),
                     'e' => fmt_e(a, p, false),
-                    'E' => fmt_e(a, p, true),
-                    'g' => fmt_g(a, p, alt, false),
-                    _ => fmt_g(a, p, alt, true),
+                    _ => fmt_g(a, p, alt, false),
                 };
-                if alt && conv == 'f' && p == 0 {
-                    b.push('.');
+                if alt {
+                    b = force_point(&b);
                 }
-                (as_f.is_sign_negative() && as_f != 0.0 || (as_f == 0.0 && as_f.is_sign_negative()), b)
+                (as_f.is_sign_negative(), "", b)
             }
             's' => {
-                let mut b = number_to_string(n);
-                if let Some(p) = precision {
-                    b = b.chars().take(p).collect();
+                if plus || space || zero || alt || precision.is_some() {
+                    return unsupported("flags or a precision with `%s`");
                 }
+                let b = number_to_string(n);
                 let pad = width.saturating_sub(b.chars().count());
                 if minus {
                     out.push_str(&b);
@@ -293,17 +376,21 @@ pub fn format_one(fmt: &str, n: LispNum) -> Result<String, FormatError> {
                 }
                 continue;
             }
-            other => return Err(FormatError::Unsupported(format!("`%{other}`"))),
+            other => return unsupported(format!("`%{other}`")),
         };
+        let signed = matches!(conv, 'd' | 'i' | 'f' | 'e' | 'g');
         let sign = if neg {
             "-"
-        } else if plus && matches!(conv, 'd' | 'i' | 'f' | 'e' | 'E' | 'g' | 'G') {
+        } else if plus && signed {
             "+"
-        } else if space && matches!(conv, 'd' | 'i' | 'f' | 'e' | 'E' | 'g' | 'G') {
+        } else if space && signed {
             " "
         } else {
             ""
         };
+        // Zero padding goes after the sign and a `0x` prefix, as in C.
+        let sign = format!("{sign}{radix_prefix}");
+        let sign = sign.as_str();
         let len = sign.len() + body.chars().count();
         let pad = width.saturating_sub(len);
         if minus {
@@ -329,42 +416,44 @@ mod tests {
 
     #[test]
     fn reads_numbers_like_emacs() {
-        assert_eq!(string_to_number("3"), LispNum::Int(3));
-        assert_eq!(string_to_number("3."), LispNum::Int(3));
-        assert_eq!(string_to_number(" -3.5abc"), LispNum::Float(-3.5));
-        assert_eq!(string_to_number(".5"), LispNum::Float(0.5));
-        assert_eq!(string_to_number("1e3"), LispNum::Float(1000.0));
-        assert_eq!(string_to_number("1.234e-3"), LispNum::Float(0.001234));
-        assert_eq!(string_to_number("abc"), LispNum::Int(0));
-        assert_eq!(string_to_number(""), LispNum::Int(0));
-        assert_eq!(string_to_number("12e"), LispNum::Int(12));
+        let int = |v: i64| Some(LispNum::int(v));
+        let float = |v: f64| Some(LispNum::Float(v));
+        assert_eq!(string_to_number("3"), int(3));
+        assert_eq!(string_to_number("3."), int(3));
+        assert_eq!(string_to_number(" -3.5abc"), float(-3.5));
+        assert_eq!(string_to_number(".5"), float(0.5));
+        assert_eq!(string_to_number("1e3"), float(1000.0));
+        assert_eq!(string_to_number("1.234e-3"), float(0.001234));
+        assert_eq!(string_to_number("abc"), int(0));
+        assert_eq!(string_to_number(""), int(0));
+        assert_eq!(string_to_number("12e"), int(12));
     }
 
     #[test]
     fn prints_numbers_like_emacs() {
-        assert_eq!(number_to_string(LispNum::Float(3.0)), "3.0");
-        assert_eq!(number_to_string(LispNum::Float(0.1)), "0.1");
-        assert_eq!(number_to_string(LispNum::Float(1000.0)), "1000.0");
-        assert_eq!(number_to_string(LispNum::Float(1e20)), "1e+20");
-        assert_eq!(number_to_string(LispNum::Float(1e-5)), "1e-05");
-        assert_eq!(number_to_string(LispNum::Float(0.1 + 0.2)), "0.30000000000000004");
-        assert_eq!(number_to_string(LispNum::Int(-7)), "-7");
+        assert_eq!(number_to_string(&LispNum::Float(3.0)), "3.0");
+        assert_eq!(number_to_string(&LispNum::Float(0.1)), "0.1");
+        assert_eq!(number_to_string(&LispNum::Float(1000.0)), "1000.0");
+        assert_eq!(number_to_string(&LispNum::Float(1e20)), "1e+20");
+        assert_eq!(number_to_string(&LispNum::Float(1e-5)), "1e-05");
+        assert_eq!(number_to_string(&LispNum::Float(0.1 + 0.2)), "0.30000000000000004");
+        assert_eq!(number_to_string(&LispNum::Int(BigInt::from(-7))), "-7");
     }
 
     #[test]
     fn formats_like_emacs() {
-        assert_eq!(format_one("%.2f", LispNum::Float(1.0 / 3.0)).unwrap(), "0.33");
-        assert_eq!(format_one("%.2f", LispNum::Int(3)).unwrap(), "3.00");
-        assert_eq!(format_one("%.1f", LispNum::Float(0.25)).unwrap(), "0.2");
-        assert_eq!(format_one("%d", LispNum::Float(-2.7)).unwrap(), "-2");
-        assert_eq!(format_one("%d", LispNum::Float(-0.7)).unwrap(), "0");
-        assert_eq!(format_one("%5.1f%%", LispNum::Float(12.345)).unwrap(), " 12.3%");
-        assert_eq!(format_one("%e", LispNum::Float(1234.5)).unwrap(), "1.234500e+03");
-        assert_eq!(format_one("%g", LispNum::Float(0.0001)).unwrap(), "0.0001");
-        assert_eq!(format_one("%g", LispNum::Float(1234567.0)).unwrap(), "1.23457e+06");
-        assert_eq!(format_one("%05d", LispNum::Int(42)).unwrap(), "00042");
-        assert_eq!(format_one("EUR %s", LispNum::Int(5)).unwrap(), "EUR 5");
-        assert_eq!(format_one("x", LispNum::Int(5)).unwrap(), "x");
-        assert_eq!(format_one("%d %d", LispNum::Int(5)), Err(FormatError::TooManySpecs));
+        assert_eq!(format_one("%.2f", &LispNum::Float(1.0 / 3.0)).unwrap(), "0.33");
+        assert_eq!(format_one("%.2f", &LispNum::int(3)).unwrap(), "3.00");
+        assert_eq!(format_one("%.1f", &LispNum::Float(0.25)).unwrap(), "0.2");
+        assert_eq!(format_one("%d", &LispNum::Float(-2.7)).unwrap(), "-2");
+        assert_eq!(format_one("%d", &LispNum::Float(-0.7)).unwrap(), "0");
+        assert_eq!(format_one("%5.1f%%", &LispNum::Float(12.345)).unwrap(), " 12.3%");
+        assert_eq!(format_one("%e", &LispNum::Float(1234.5)).unwrap(), "1.234500e+03");
+        assert_eq!(format_one("%g", &LispNum::Float(0.0001)).unwrap(), "0.0001");
+        assert_eq!(format_one("%g", &LispNum::Float(1234567.0)).unwrap(), "1.23457e+06");
+        assert_eq!(format_one("%05d", &LispNum::int(42)).unwrap(), "00042");
+        assert_eq!(format_one("EUR %s", &LispNum::int(5)).unwrap(), "EUR 5");
+        assert_eq!(format_one("x", &LispNum::int(5)).unwrap(), "x");
+        assert_eq!(format_one("%d %d", &LispNum::int(5)), Err(FormatError::TooManySpecs));
     }
 }

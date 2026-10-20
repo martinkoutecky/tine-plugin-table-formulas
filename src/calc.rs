@@ -21,6 +21,23 @@ use std::cmp::Ordering;
 /// numbers in a table are almost certainly not intended and cost memory.
 const MAX_EXP: i64 = 10_000;
 
+/// Budgets against malformed input, so that it is declined with a notice
+/// rather than overflowing the guest's stack or running past the host's
+/// invocation timeout. Integers: about 2,000 decimal digits (Calc's bignums are
+/// unbounded; multiplying two 20,000-digit numbers took 60 ms in the guest).
+pub const MAX_INT_BITS: u64 = 6_644;
+/// Nesting depth of a formula's syntax tree (parentheses, operator chains).
+pub const MAX_DEPTH: usize = 200;
+/// Digits in one number literal.
+const MAX_LITERAL_DIGITS: usize = 2_000;
+
+fn int_budget(x: BigInt) -> CResult<BigInt> {
+    if x.bits() > MAX_INT_BITS {
+        return unsupported("an integer with more than 2000 digits");
+    }
+    Ok(x)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Num {
     Int(BigInt),
@@ -85,19 +102,16 @@ impl Default for Modes {
 // ---------------------------------------------------------------- numbers
 
 fn pow10(n: i64) -> BigInt {
-    let mut r = BigInt::one();
-    let ten = BigInt::from(10);
-    for _ in 0..n.max(0) {
-        r *= &ten;
-    }
-    r
+    num_traits::pow::pow(BigInt::from(10), n.max(0) as usize)
 }
 
 pub fn numdigs(a: &BigInt) -> i64 {
     if a.is_zero() {
         0
+    } else if let Some(v) = a.magnitude().to_u128() {
+        v.ilog10() as i64 + 1
     } else {
-        a.abs().to_string().len() as i64
+        a.magnitude().to_string().len() as i64
     }
 }
 
@@ -167,7 +181,7 @@ fn float_of(a: &Num, prec: i64) -> CResult<Num> {
 
 pub fn add(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
     if let (Num::Int(x), Num::Int(y)) = (a, b) {
-        return Ok(Num::Int(x + y));
+        return Ok(Num::Int(int_budget(x + y)?));
     }
     if is_zero(a) {
         return if is_float(a) && !is_float(b) { float_of(b, prec) } else { Ok(b.clone()) };
@@ -205,7 +219,10 @@ pub fn sub(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
 
 pub fn mul(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
     if let (Num::Int(x), Num::Int(y)) = (a, b) {
-        return Ok(Num::Int(x * y));
+        if x.bits() + y.bits() > MAX_INT_BITS + 1 {
+            return unsupported("an integer with more than 2000 digits");
+        }
+        return Ok(Num::Int(int_budget(x * y)?));
     }
     if is_zero(a) {
         return if is_float(b) && !is_float(a) { float_of(a, prec) } else { Ok(a.clone()) };
@@ -273,13 +290,19 @@ fn pow_int(base: &BigInt, exp: &BigInt) -> CResult<BigInt> {
     if n > 4096 || (base.abs() > BigInt::one() && n > 512) {
         return unsupported("power too large");
     }
-    Ok(num_traits::pow::pow(base.clone(), n as usize))
+    if base.bits().saturating_sub(1).saturating_mul(n as u64) > MAX_INT_BITS {
+        return unsupported("an integer with more than 2000 digits");
+    }
+    int_budget(num_traits::pow::pow(base.clone(), n as usize))
 }
 
 // ---------------------------------------------------------------- reading
 
 /// Read a Calc number token (digits, `.`, optional exponent).
 pub fn read_number(s: &str, prec: i64) -> CResult<Num> {
+    if s.len() > MAX_LITERAL_DIGITS {
+        return unsupported("a number with more than 2000 digits");
+    }
     let (mant, exp) = match s.find(['e', 'E']) {
         Some(i) => (&s[..i], Some(&s[i + 1..])),
         None => (s, None),
@@ -539,6 +562,8 @@ pub enum Expr {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Current recursion depth of `expr`.
+    depth: usize,
 }
 
 const COMPARISONS: &[&str] = &["<", ">", "<=", ">=", "==", "=", "!="];
@@ -610,8 +635,26 @@ impl Parser {
         matches!(self.peek(), Tok::Punc(q) if q == p)
     }
 
+    /// An expression and the depth of its syntax tree. Both the recursion
+    /// here and the tree (left-nested operator chains grow it without
+    /// recursion) are capped at [`MAX_DEPTH`], since evaluating and dropping
+    /// the tree recurse over it.
     fn expr(&mut self, min_prec: i32) -> CResult<Expr> {
-        let mut x = self.factor()?;
+        self.expr_d(min_prec).map(|(e, _)| e)
+    }
+
+    fn expr_d(&mut self, min_prec: i32) -> CResult<(Expr, usize)> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return unsupported("a formula nested too deeply");
+        }
+        let r = self.expr_inner(min_prec);
+        self.depth -= 1;
+        r
+    }
+
+    fn expr_inner(&mut self, min_prec: i32) -> CResult<(Expr, usize)> {
+        let (mut x, mut xd) = self.factor()?;
         let mut first = true;
         loop {
             let t = self.peek().clone();
@@ -640,27 +683,35 @@ impl Parser {
                     }
                 }
             }
-            let rhs = self.expr(rp)?;
+            let (rhs, rd) = self.expr_d(rp)?;
+            xd = xd.max(rd) + 1;
+            if xd > MAX_DEPTH {
+                return unsupported("a formula nested too deeply");
+            }
             x = Expr::Bin(op, Box::new(x), Box::new(rhs));
             first = false;
         }
-        Ok(x)
+        Ok((x, xd))
     }
 
-    fn args(&mut self, close: &str) -> CResult<Vec<Expr>> {
+    /// Arguments up to `close`, and the deepest argument's tree depth.
+    fn args(&mut self, close: &str) -> CResult<(Vec<Expr>, usize)> {
         let mut out = Vec::new();
+        let mut d = 0;
         if self.is_punc(close) {
             self.next();
-            return Ok(out);
+            return Ok((out, d));
         }
         loop {
-            out.push(self.expr(0)?);
+            let (e, ed) = self.expr_d(0)?;
+            d = d.max(ed);
+            out.push(e);
             match self.next() {
                 Tok::Punc(p) if p == "," => continue,
-                Tok::Punc(p) if p == close => return Ok(out),
+                Tok::Punc(p) if p == close => return Ok((out, d)),
                 // Calc accepts the end of the formula in place of the closing
                 // bracket (`math-read-factor`, `math-read-brackets`).
-                Tok::End => return Ok(out),
+                Tok::End => return Ok((out, d)),
                 Tok::Punc(p) if p == ";" || p == ".." || p == "." => {
                     return unsupported("matrix or interval syntax");
                 }
@@ -671,25 +722,31 @@ impl Parser {
         }
     }
 
-    fn factor(&mut self) -> CResult<Expr> {
+    fn factor(&mut self) -> CResult<(Expr, usize)> {
         match self.next() {
-            Tok::Num(n) => Ok(Expr::Num(n)),
-            Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::Num(n) => Ok((Expr::Num(n), 1)),
+            Tok::Str(s) => Ok((Expr::Str(s), 1)),
             Tok::Sym(name) => {
                 if self.is_punc("(") {
                     self.next();
-                    let args = self.args(")")?;
-                    Ok(Expr::Call(name, args))
+                    let (args, d) = self.args(")")?;
+                    Ok((Expr::Call(name, args), d + 1))
                 } else {
-                    Ok(Expr::Sym(name))
+                    Ok((Expr::Sym(name), 1))
                 }
             }
             Tok::Punc(p) => match p.as_str() {
-                "-" => Ok(Expr::Neg(Box::new(self.expr(197)?))),
-                "+" => self.expr(197),
-                "!" => Ok(Expr::Not(Box::new(self.expr(1000)?))),
+                "-" => {
+                    let (e, d) = self.expr_d(197)?;
+                    Ok((Expr::Neg(Box::new(e)), d + 1))
+                }
+                "+" => self.expr_d(197),
+                "!" => {
+                    let (e, d) = self.expr_d(1000)?;
+                    Ok((Expr::Not(Box::new(e)), d + 1))
+                }
                 "(" => {
-                    let inner = self.expr(0)?;
+                    let inner = self.expr_d(0)?;
                     match self.next() {
                         Tok::Punc(q) if q == ")" => Ok(inner),
                         Tok::End => Ok(inner),
@@ -705,7 +762,7 @@ impl Parser {
                     // `[2 3, 4]` is `[6, 4]`). The tokens do not keep spaces,
                     // so only a single plain element is accepted there.
                     let comma = self.vector_has_comma();
-                    let items = self.args("]")?;
+                    let (items, d) = self.args("]")?;
                     let plain = |e: &Expr| match e {
                         Expr::Num(_) | Expr::Str(_) | Expr::Sym(_) => true,
                         Expr::Neg(inner) => matches!(**inner, Expr::Num(_)),
@@ -714,7 +771,7 @@ impl Parser {
                     if !comma && !items.iter().all(plain) {
                         return unsupported("a vector without commas (Calc separates its elements by spaces)");
                     }
-                    Ok(Expr::Vec(items))
+                    Ok((Expr::Vec(items), d + 1))
                 }
                 ")" | "]" | "," => calc_error(format!("expected a number before `{p}`")),
                 _ => unsupported(format!("Calc syntax `{p}`")),
@@ -726,7 +783,7 @@ impl Parser {
 
 pub fn parse(src: &str) -> CResult<Expr> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, depth: 0 };
     let e = p.expr(0)?;
     match p.peek() {
         Tok::End => Ok(e),

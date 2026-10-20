@@ -78,13 +78,19 @@ pub struct Skipped {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
+    /// Formulas the plugin could not evaluate exactly. A table with one is
+    /// left entirely as it was.
     pub skipped: Vec<Skipped>,
     /// Formulas whose result was `#ERROR`.
     pub errors: Vec<String>,
+    /// Tables left unchanged because of a skipped formula.
+    pub declined_tables: usize,
+    /// A Markdown table followed by an Org `#+TBLFM:` line (not read).
+    pub org_line_in_markdown: bool,
 }
 
 impl Report {
-    fn skip(&mut self, formula: &str, reason: &str) {
+    pub fn skip(&mut self, formula: &str, reason: &str) {
         if !self.skipped.iter().any(|s| s.formula == formula && s.reason == reason) {
             self.skipped.push(Skipped { formula: formula.to_string(), reason: reason.to_string() });
         }
@@ -96,10 +102,12 @@ impl Report {
     }
 }
 
-/// The value a reference stands for: one field or a list of fields.
+/// The value a reference stands for: one field or a list of fields, or a
+/// reason the plugin cannot reproduce what Org does with it.
 enum RangeVal {
     One(String),
     Many(Vec<String>),
+    Decline(String),
 }
 
 enum EvalResult {
@@ -114,9 +122,28 @@ struct Engine<'a> {
     types: Vec<bool>, // true = hline
     dlines: Vec<usize>,
     ncol: usize,
+    /// Work done so far in this recalculation ([`MAX_WORK`]).
+    work: std::cell::Cell<usize>,
 }
 
 const MAX_SUBSTITUTIONS: usize = 2000;
+
+// Plugin-local budgets (malformed input: a formula or table that would make
+// the guest run past the host's invocation timeout or memory cap). Hitting
+// one declines the table with a notice instead of trapping the worker.
+
+/// Fields one range reference may cover (the left-hand-side expansion has
+/// the same cap).
+pub const MAX_RANGE_FIELDS: usize = 100_000;
+/// Work one table's recalculation may do: one unit per field read through a
+/// reference, [`EVAL_WORK`] per evaluated field. Measured on the release
+/// guest under Node (2026-10-20): about 2.5 us per field read and 10-15 us
+/// per evaluation, so the cap stays near 125 ms, half the host's 250 ms
+/// invocation timeout.
+pub const MAX_WORK: usize = 50_000;
+pub const EVAL_WORK: usize = 8;
+/// Length of one formula after its references are substituted.
+pub const MAX_EXPANDED_FORMULA: usize = 256 * 1024;
 
 impl<'a> Engine<'a> {
     fn new(table: &'a mut Table) -> Result<Self, Abort> {
@@ -136,7 +163,7 @@ impl<'a> Engine<'a> {
             Line::Data(f) => f.len(),
             Line::Hline => 0,
         };
-        Ok(Engine { table, types, dlines, ncol })
+        Ok(Engine { table, types, dlines, ncol, work: std::cell::Cell::new(0) })
     }
 
     fn fields(&self, line: usize) -> &[String] {
@@ -164,6 +191,11 @@ impl<'a> Engine<'a> {
 
     fn row_type(&self, want_hline: bool, n: usize, start: i64, backwards: bool, desc: &str, f: &str) -> Result<usize, Abort> {
         let l = self.types.len() as i64;
+        if n as i64 >= l {
+            // Each step moves at least one line, so this count cannot stay
+            // inside the table (and looping it would not end in time).
+            return abort(Some(f), format!("row descriptor {desc} leads outside the table"));
+        }
         let mut i = start;
         for _ in 0..n {
             loop {
@@ -209,13 +241,9 @@ impl<'a> Engine<'a> {
         let mut hn = c.get(3).map(|m| m.as_str().len());
         let mut hdir = c.get(2).map(|m| m.as_str());
         let odir = c.get(5).map(|m| m.as_str());
-        let on: Option<usize> = match c.get(6) {
-            Some(m) => Some(m.as_str().parse().map_err(|_| Abort {
-                formula: Some(f.to_string()),
-                message: format!("invalid row descriptor `{desc}`"),
-            })?),
-            None => None,
-        };
+        // A count that does not fit is far outside any table; `row_type`
+        // reports it as leading outside.
+        let on: Option<usize> = c.get(6).map(|m| m.as_str().parse().unwrap_or(usize::MAX));
         let mut cline = cline as i64;
         if hn.is_some() && hdir.is_none() {
             cline = 0;
@@ -236,10 +264,7 @@ impl<'a> Engine<'a> {
     fn column_of(spec: Option<&str>, col: i64) -> i64 {
         let Some(s) = spec else { return col };
         let s = &s[1..]; // drop `$`
-        let n = match printf::string_to_number(s) {
-            printf::LispNum::Int(v) => v as i64,
-            printf::LispNum::Float(x) => x as i64,
-        };
+        let n = printf::small_int(s);
         if n == 0 {
             col
         } else if s.starts_with(['-', '+']) {
@@ -283,8 +308,22 @@ impl<'a> Engine<'a> {
             }
             last -= 1;
         }
-        let (lo, hi) = (first.min(last), first.max(last));
-        let mut out = Vec::new();
+        if first > last {
+            // Both ends sit on hlines with no data line between them. Org
+            // 9.8.7 then reads fields outside the range (it gives 2 for
+            // `vsum(@I$1..@I$2)` on `|1|2|`/hline/`|3|4|`); not reproduced.
+            return Ok(RangeVal::Decline(format!("the range {desc} has no data lines between its hlines")));
+        }
+        let (lo, hi) = (first, last);
+        let rows = (lo..=hi).filter(|&l| self.is_dline(l)).count();
+        let area = rows.saturating_mul((lc - fc + 1) as usize);
+        if area > MAX_RANGE_FIELDS {
+            return Ok(RangeVal::Decline(format!("the range {desc} covers more than {MAX_RANGE_FIELDS} fields")));
+        }
+        if !self.charge(area) {
+            return Ok(RangeVal::Decline(WORK_REASON.into()));
+        }
+        let mut out = Vec::with_capacity(area);
         for l in lo..=hi {
             if !self.is_dline(l) {
                 continue;
@@ -335,6 +374,17 @@ impl<'a> Engine<'a> {
     }
 }
 
+const WORK_REASON: &str = "the table needs more computation than the plugin allows in one run (budget: 50000 field reads in total)";
+
+impl Engine<'_> {
+    /// Add `units` of work; `false` once over [`MAX_WORK`].
+    fn charge(&self, units: usize) -> bool {
+        let total = self.work.get().saturating_add(units);
+        self.work.set(total);
+        total <= MAX_WORK
+    }
+}
+
 fn range_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     re(
@@ -379,19 +429,27 @@ fn handle_first_last(s: &str, nrows: usize, ncol: usize, f: &str) -> Result<Stri
     Ok(out)
 }
 
-fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> String {
-    let conv = |x: &str| {
-        if numbers {
-            printf::number_to_string(printf::string_to_number(x))
-        } else {
-            x.to_string()
-        }
-    };
+/// `string-to-number` then `number-to-string`, as the `N` flag converts a
+/// field. `Err` is a skip reason (a value the plugin cannot convert exactly).
+fn lisp_number_text(x: &str) -> Result<String, String> {
+    match printf::string_to_number(x) {
+        Some(n) => Ok(printf::number_to_string(&n)),
+        None => Err(format!(
+            "the N flag on `{}` (an infinity/NaN spelling or an integer over {} digits)",
+            x.chars().take(40).collect::<String>(),
+            printf::MAX_INT_DIGITS
+        )),
+    }
+}
+
+fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> Result<String, String> {
+    let conv = |x: &str| if numbers { lisp_number_text(x) } else { Ok(x.to_string()) };
     let nonblank = |x: &str| x.chars().any(|c| !c.is_whitespace());
-    match v {
+    Ok(match v {
+        RangeVal::Decline(why) => return Err(why.clone()),
         RangeVal::One(x) => {
             if nonblank(x) {
-                format!("({})", conv(x))
+                format!("({})", conv(x)?)
             } else if !keep_empty || numbers {
                 "(0)".to_string()
             } else {
@@ -399,22 +457,19 @@ fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> String {
             }
         }
         RangeVal::Many(items) => {
-            let parts: Vec<String> = items
-                .iter()
-                .filter(|x| keep_empty || nonblank(x))
-                .map(|x| {
-                    if nonblank(x) {
-                        conv(x)
-                    } else if !keep_empty || numbers {
-                        "0".to_string()
-                    } else {
-                        "nan".to_string()
-                    }
-                })
-                .collect();
+            let mut parts: Vec<String> = Vec::with_capacity(items.len());
+            for x in items.iter().filter(|x| keep_empty || nonblank(x)) {
+                parts.push(if nonblank(x) {
+                    conv(x)?
+                } else if !keep_empty || numbers {
+                    "0".to_string()
+                } else {
+                    "nan".to_string()
+                });
+            }
             format!("[{}]", parts.join(","))
         }
-    }
+    })
 }
 
 struct Prepared {
@@ -441,10 +496,7 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
             let num = re(&NUM, r"([pnfse])(-?[0-9]+)");
             while let Some(c) = num.captures(&fmt) {
                 let letter = c.get(1).map_or("", |m| m.as_str());
-                let n: i64 = match printf::string_to_number(c.get(2).map_or("0", |m| m.as_str())) {
-                    printf::LispNum::Int(v) => v.clamp(-1_000_000, 1_000_000) as i64,
-                    printf::LispNum::Float(_) => 0,
-                };
+                let n: i64 = printf::small_int(c.get(2).map_or("0", |m| m.as_str()));
                 match letter {
                     "p" => {
                         if !(3..=200).contains(&n) {
@@ -491,6 +543,9 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
 impl<'a> Engine<'a> {
     /// `org-table-eval-formula` for the field at `line`, column `n0`.
     fn eval(&self, rhs: &str, line: usize, n0: usize, f: &str) -> Result<EvalResult, Abort> {
+        if !self.charge(EVAL_WORK) {
+            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        }
         let p = match prepare(rhs) {
             Ok(p) => p,
             Err(why) => return Ok(EvalResult::Skip(why)),
@@ -504,7 +559,10 @@ impl<'a> Engine<'a> {
         if p.numbers {
             for x in fields.iter_mut() {
                 if x.chars().any(|c| !c.is_whitespace()) {
-                    *x = printf::number_to_string(printf::string_to_number(x));
+                    match lisp_number_text(x) {
+                        Ok(t) => *x = t,
+                        Err(why) => return Ok(EvalResult::Skip(why)),
+                    }
                 }
             }
         }
@@ -534,7 +592,13 @@ impl<'a> Engine<'a> {
                 return abort(Some(f), "too many references");
             }
             let v = self.get_range(m.as_str(), line, n0 as i64, f)?;
-            let rpl = make_reference(&v, p.keep_empty, p.numbers);
+            let rpl = match make_reference(&v, p.keep_empty, p.numbers) {
+                Ok(r) => r,
+                Err(why) => return Ok(EvalResult::Skip(why)),
+            };
+            if form.len() - m.as_str().len() + rpl.len() > MAX_EXPANDED_FORMULA {
+                return Ok(EvalResult::Skip(format!("the formula grows past {MAX_EXPANDED_FORMULA} bytes")));
+            }
             if rpl.contains(&form) {
                 return abort(Some(f), format!("invalid reference \"{form}\""));
             }
@@ -550,19 +614,20 @@ impl<'a> Engine<'a> {
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
             }
-            let num = |g: usize| -> i64 {
-                match printf::string_to_number(c.get(g).map_or("0", |m| m.as_str())) {
-                    printf::LispNum::Int(v) => v.clamp(-1_000_000, 1_000_000) as i64,
-                    printf::LispNum::Float(_) => 0,
-                }
-            };
+            let num = |g: usize| -> i64 { printf::small_int(c.get(g).map_or("0", |m| m.as_str())) };
             let a = num(1) - 1 + if c.get(2).is_some() { n0 as i64 } else { 0 };
             let b = num(3) + if c.get(4).is_some() { n0 as i64 } else { 0 };
             if a < 0 || b > fields.len() as i64 || a > b {
                 return abort(Some(f), format!("range {} is outside the row", c.get(0).map_or("", |m| m.as_str())));
             }
             let slice = fields[a as usize..b as usize].to_vec();
-            let rpl = make_reference(&RangeVal::Many(slice), p.keep_empty, p.numbers);
+            let rpl = match make_reference(&RangeVal::Many(slice), p.keep_empty, p.numbers) {
+                Ok(r) => r,
+                Err(why) => return Ok(EvalResult::Skip(why)),
+            };
+            if form.len() + rpl.len() > MAX_EXPANDED_FORMULA {
+                return Ok(EvalResult::Skip(format!("the formula grows past {MAX_EXPANDED_FORMULA} bytes")));
+            }
             let r = c.get(0).map_or(0..0, |m| m.range());
             form.replace_range(r, &rpl);
         }
@@ -576,10 +641,7 @@ impl<'a> Engine<'a> {
                 return abort(Some(f), "too many references");
             }
             let raw = c.get(1).map_or("0", |m| m.as_str());
-            let mut n = match printf::string_to_number(raw) {
-                printf::LispNum::Int(v) => v.clamp(-1_000_000, 1_000_000) as i64,
-                printf::LispNum::Float(_) => 0,
-            };
+            let mut n = printf::small_int(raw);
             if c.get(2).is_some() {
                 n += n0 as i64;
             }
@@ -588,7 +650,13 @@ impl<'a> Engine<'a> {
             let Some(x) = fields.get(idx as usize - 1) else {
                 return abort(Some(f), format!("invalid field specifier \"{whole}\""));
             };
-            let rpl = make_reference(&RangeVal::One(x.clone()), p.keep_empty, p.numbers);
+            let rpl = match make_reference(&RangeVal::One(x.clone()), p.keep_empty, p.numbers) {
+                Ok(r) => r,
+                Err(why) => return Ok(EvalResult::Skip(why)),
+            };
+            if form.len() + rpl.len() > MAX_EXPANDED_FORMULA {
+                return Ok(EvalResult::Skip(format!("the formula grows past {MAX_EXPANDED_FORMULA} bytes")));
+            }
             if rpl.contains(&formula) {
                 return abort(Some(f), format!("invalid field specifier \"{whole}\""));
             }
@@ -606,7 +674,9 @@ impl<'a> Engine<'a> {
             Err(Outcome::Unsupported(why)) => return Ok(EvalResult::Skip(why)),
         };
         let out = match &p.fmt {
-            Some(fmt) => match printf::format_one(fmt, printf::string_to_number(&ev)) {
+            Some(fmt) => match printf::string_to_number(&ev).ok_or(FormatError::Unsupported(
+                "of a number the plugin cannot convert exactly".into(),
+            )).and_then(|n| printf::format_one(fmt, &n)) {
                 Ok(s) => s,
                 Err(FormatError::TooManySpecs) => {
                     return abort(Some(f), format!("the format `{fmt}` has more than one `%` conversion"));
@@ -616,6 +686,9 @@ impl<'a> Engine<'a> {
             None => ev,
         };
         let out = out.replace('\n', "");
+        if out.len() > crate::MAX_RAW_UTF16 {
+            return Ok(EvalResult::Skip("the result is longer than a block may be".into()));
+        }
         if out.contains('|') {
             return Ok(EvalResult::Skip("the result contains `|`".into()));
         }
@@ -631,7 +704,10 @@ impl<'a> Engine<'a> {
         }
     }
 
-    fn apply(&mut self, res: EvalResult, line: usize, col: usize, formula: &str, report: &mut Report) {
+    /// Store one result. Returns `false` when the formula was declined: the
+    /// caller then stops, and the whole table is left as it was, since later
+    /// formulas may read the cell Org would have changed.
+    fn apply(&mut self, res: EvalResult, line: usize, col: usize, formula: &str, report: &mut Report) -> bool {
         match res {
             // Org inserts the text as is; aligning the table then trims the
             // field (`%5.1f` padding does not survive).
@@ -642,13 +718,22 @@ impl<'a> Engine<'a> {
                 report.error(formula);
                 self.set_field(line, col, "#ERROR".to_string());
             }
-            EvalResult::Skip(why) => report.skip(formula, &why),
+            EvalResult::Skip(why) => {
+                report.skip(formula, &why);
+                return false;
+            }
         }
+        true
     }
 }
 
 /// One `org-table-recalculate` pass over the whole table (what `C-c C-c` on
 /// the formula line does). The table is changed in place.
+///
+/// When the report has a skipped formula, the pass stopped there and the
+/// table holds a partial result that the caller must discard: a declined
+/// formula leaves a cell Org would have changed, so any later formula could
+/// compute from the wrong value (review finding F1).
 pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abort> {
     let mut report = Report::default();
     let mut eng = Engine::new(table)?;
@@ -686,6 +771,7 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             cols.push((n, rhs, text));
         } else if !lhs.starts_with('@') && !lhs.starts_with('$') {
             report.skip(&text, "named fields are not supported");
+            return Ok(report);
         } else {
             field_eqs.push((lhs, rhs, text));
         }
@@ -714,10 +800,14 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             let (Some(r1), Some(r2)) = (eng.line_to_dline(first, false), eng.line_to_dline(last, true)) else {
                 return abort(f, format!("the range {lhs} has no data lines"));
             };
+            if r1 > r2 {
+                report.skip(text, &format!("the target range {lhs} has no data lines between its hlines"));
+                return Ok(report);
+            }
             if fc < 1 || lc > 1000 {
                 return abort(f, format!("the range {lhs} has an invalid column"));
             }
-            if (r2 + 1).saturating_sub(r1) as i64 * (lc - fc + 1) > 100_000 {
+            if (r2 + 1).saturating_sub(r1) as i64 * (lc - fc + 1) > MAX_RANGE_FIELDS as i64 {
                 return abort(f, format!("the range {lhs} is too large"));
             }
             for r in r1..=r2 {
@@ -775,20 +865,35 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
                     continue;
                 }
                 let res = eng.eval(rhs, l, *c, text)?;
-                eng.apply(res, l, *c, text, &mut report);
+                if !eng.apply(res, l, *c, text, &mut report) {
+                    return Ok(report);
+                }
             }
         }
     }
+    if let Some((_, _, _, text)) = expanded.first() {
+        // Org checks "Missing columns" against a column count it takes at
+        // the cursor position, which moves between field formulas; with rows
+        // of different lengths that is not reproduced (review finding F5).
+        let widths: HashSet<usize> = eng.dlines.iter().map(|&l| eng.fields(l).len()).collect();
+        if widths.len() > 1 {
+            report.skip(text, "field formulas in a table whose rows have different numbers of fields");
+            return Ok(report);
+        }
+    }
+    let width = eng.dlines.first().map_or(0, |&l| eng.fields(l).len());
     for (r, c, rhs, text) in &expanded {
         let l = eng.dlines[r - 1];
         if *c > 1000 {
             return abort(Some(text), "formula column target too large");
         }
-        if *c > eng.fields(l).len() {
+        if *c > width {
             return abort(Some(text), format!("missing columns in the table for @{r}${c}"));
         }
         let res = eng.eval(rhs, l, *c, text)?;
-        eng.apply(res, l, *c, text, &mut report);
+        if !eng.apply(res, l, *c, text, &mut report) {
+            return Ok(report);
+        }
     }
     Ok(report)
 }

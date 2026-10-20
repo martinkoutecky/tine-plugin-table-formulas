@@ -8,6 +8,12 @@
 //! `declined` (and then the plugin must have said so in its report, and every
 //! cell it did write must equal Org's) or `abort` (Org stops with an error;
 //! the plugin must stop and write nothing).
+//!
+//! Since review round 1 (finding F1), a declined case must leave the input
+//! byte for byte unchanged: one formula the plugin cannot evaluate keeps the
+//! whole table, because later formulas could read the cell Org would have
+//! changed. A declined case may also be one where Org aborts and the plugin
+//! declines instead (both write nothing).
 
 use serde_json::Value;
 use tine_plugin_table_formulas::table::{split_row, Dialect};
@@ -61,7 +67,7 @@ fn org_mode_corpus() {
     let expectations = load("expectations.json");
     let mut cases: Vec<Value> = Vec::new();
     let mut revisions = Vec::new();
-    for file in ["org-table-tests.json", "org-table-tests-manual.json", "emacs-oracle.json"] {
+    for file in ["org-table-tests.json", "org-table-tests-manual.json", "emacs-oracle.json", "emacs-oracle-r1.json"] {
         let v = load(file);
         revisions.push(v["revision"].as_str().unwrap_or("?").to_string());
         cases.extend(v["cases"].as_array().cloned().unwrap_or_default());
@@ -76,6 +82,7 @@ fn org_mode_corpus() {
         let result = process_text(input, Dialect::Org, laps_of(&case["laps"]));
         match (status, result) {
             ("abort", Err(_)) => aborted += 1,
+            ("declined", Err(a)) => failures.push(format!("{id}: listed as declined, but the plugin aborted: {a:?}")),
             ("abort", Ok((out, _))) => failures.push(format!("{id}: Org aborts, the plugin wrote\n{out}")),
             (_, Err(a)) => failures.push(format!("{id}: unexpected abort {a:?}")),
             (status, Ok((out, report))) => {
@@ -102,6 +109,10 @@ fn org_mode_corpus() {
                 }
                 if report.skipped.is_empty() {
                     failures.push(format!("{id}: differs from Org without a notice\n{out}"));
+                    continue;
+                }
+                if out != input {
+                    failures.push(format!("{id}: declined, but the text changed\n--- got\n{out}\n--- input\n{input}"));
                     continue;
                 }
                 if let Some(Value::String(e)) = case.get("expected") {

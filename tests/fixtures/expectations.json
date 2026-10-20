@@ -206,5 +206,57 @@
  "emacs-vec-one-space": {
   "status": "declined",
   "why": "a one-element range whose field has spaces: Calc reads [2 3] as two elements; declined"
+ },
+ "r1-f1-sqrt-dependency": {
+  "status": "declined",
+  "why": "review F1: `sqrt` is outside the subset; the dependent `$3=$2+1` must not run on the stale cell, so the whole table is kept"
+ },
+ "r1-f1-divzero-dependency": {
+  "status": "declined",
+  "why": "review F1: Calc keeps `1/0` symbolic; the whole table is kept"
+ },
+ "r1-f1-format-dependency": {
+  "status": "declined",
+  "why": "review F1: `%c` is not implemented; the whole table is kept"
+ },
+ "r1-f1-flag-dependency": {
+  "status": "declined",
+  "why": "review F1: duration flag `T`; the whole table is kept"
+ },
+ "r1-f1-row-dependency": {
+  "status": "declined",
+  "why": "review F1: field formula dependency across rows; the whole table is kept"
+ },
+ "r1-f4-crossed-hline-range": {
+  "status": "declined",
+  "why": "review F4: a range whose ends are hlines with no data line between; Org reads outside it"
+ },
+ "r1-f4-two-hlines": {
+  "status": "declined",
+  "why": "review F4: consecutive hlines, empty range"
+ },
+ "r1-f5-ragged-short-last": {
+  "status": "declined",
+  "why": "review F5: field formula in a ragged table; Org aborts with Missing columns, depending on its cursor; the plugin declines"
+ },
+ "r1-f5-ragged-short-last-2": {
+  "status": "declined",
+  "why": "review F5: as above, with a second field formula"
+ },
+ "r1-f5-ragged-short-first": {
+  "status": "declined",
+  "why": "review F5: field formula in a ragged table; Org proceeds; the plugin declines"
+ },
+ "test-org-table/simple-formula/with-grouping/no-title-row@110#1": {
+  "status": "declined",
+  "why": "review F1 (whole-table decline): two laps; on the first lap `$2 = 2 * $1` meets the text `replace` (Calc keeps `2 replace` symbolically, the second lap overwrites it). Matched before round 1 only because the skipped cell was overwritten later; now the table is kept."
+ },
+ "test-org-table/simple-formula/with-grouping/with-title-row@135#1": {
+  "status": "declined",
+  "why": "review F1 (whole-table decline): two laps; on the first lap `$2 = 2 * $1` meets the text `replace` (Calc keeps `2 replace` symbolically, the second lap overwrites it). Matched before round 1 only because the skipped cell was overwritten later; now the table is kept."
+ },
+ "r1-f6 $1=1;%#.1g": {
+  "status": "declined",
+  "why": "review F6: the `#` flag with `%g` is declined (Emacs 31.1 gives `1.e+05` for `%#.5g` of 99999.5 where C gives `1.0000e+05`)"
  }
 }

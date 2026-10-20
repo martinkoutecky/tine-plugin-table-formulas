@@ -42,6 +42,9 @@ pub struct Found {
     pub tblfm: Option<String>,
     /// A `#+TBLFM:` line under a Markdown table (not read; the comment form is).
     pub md_has_org_tblfm: bool,
+    /// Why the plugin will not touch this table (a Markdown layout whose
+    /// extent it cannot determine); its formulas are then reported, not run.
+    pub decline: Option<String>,
 }
 
 /// A table parsed into lines.
@@ -82,53 +85,257 @@ fn is_blank(line: &str) -> bool {
     line.trim_matches([' ', '\t']).is_empty()
 }
 
-fn fence_marker(line: &str, dialect: Dialect) -> Option<String> {
-    let t = line.trim_start_matches([' ', '\t']);
-    match dialect {
-        Dialect::Markdown => {
-            for f in ["```", "~~~"] {
-                if t.starts_with(f) {
-                    let n = t.chars().take_while(|c| *c == f.chars().next().unwrap_or('`')).count();
-                    return Some(f.chars().next().unwrap_or('`').to_string().repeat(n));
-                }
-            }
-            None
+/// Indentation in columns (a tab advances to the next multiple of 4), and
+/// the rest of the line.
+fn indent_of(line: &str) -> (usize, &str) {
+    let mut cols = 0;
+    for (i, c) in line.char_indices() {
+        match c {
+            ' ' => cols += 1,
+            '\t' => cols += 4 - cols % 4,
+            _ => return (cols, &line[i..]),
         }
+    }
+    (cols, "")
+}
+
+/// A CommonMark opening code fence: at most 3 spaces of indentation, then at
+/// least three backticks or tildes (a backtick fence's info string has no
+/// backtick). Returns the fence character and its length.
+fn md_opening_fence(line: &str) -> Option<(char, usize)> {
+    let (ind, rest) = indent_of(line);
+    if ind > 3 {
+        return None;
+    }
+    let ch = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let n = rest.chars().take_while(|c| *c == ch).count();
+    if n < 3 {
+        return None;
+    }
+    if ch == '`' && rest[n..].contains('`') {
+        return None;
+    }
+    Some((ch, n))
+}
+
+/// A CommonMark closing fence for an opener `(ch, n)`: at most 3 spaces of
+/// indentation, at least `n` fence characters, then only spaces or tabs.
+fn md_closing_fence(line: &str, ch: char, n: usize) -> bool {
+    let (ind, rest) = indent_of(line);
+    if ind > 3 {
+        return false;
+    }
+    let k = rest.chars().take_while(|c| *c == ch).count();
+    k >= n && is_blank(&rest[k * ch.len_utf8()..])
+}
+
+/// CommonMark HTML blocks of kinds 1 to 5, which run until an end marker
+/// (possibly on the same line), across blank lines. `Some(None)` is a block
+/// that ends on its first line; `Some(Some(marker))` one that continues.
+fn md_html_block_start(line: &str) -> Option<Option<&'static str>> {
+    let (ind, rest) = indent_of(line);
+    if ind > 3 || !rest.starts_with('<') {
+        return None;
+    }
+    let lower = rest.to_ascii_lowercase();
+    let mut end: Option<&'static str> = None;
+    for (tag, close) in [("script", "</script>"), ("pre", "</pre>"), ("style", "</style>"), ("textarea", "</textarea>")] {
+        if let Some(after) = lower.strip_prefix('<').and_then(|r| r.strip_prefix(tag)) {
+            if after.is_empty() || after.starts_with([' ', '\t', '>']) {
+                end = Some(close);
+            }
+        }
+    }
+    let (end, from) = match end {
+        Some(e) => (e, 1),
+        None if rest.starts_with("<!--") => ("-->", 4),
+        None if rest.starts_with("<?") => ("?>", 2),
+        None if rest.starts_with("<![CDATA[") => ("]]>", 9),
+        None if rest.starts_with("<!") && rest[2..].starts_with(|c: char| c.is_ascii_alphabetic()) => (">", 2),
+        None => return None,
+    };
+    Some(if lower[from..].contains(end) { None } else { Some(end) })
+}
+
+/// A Markdown block-quote line: the text after its `>` markers.
+fn md_unquote(line: &str) -> Option<&str> {
+    let (ind, rest) = indent_of(line);
+    if ind > 3 || !rest.starts_with('>') {
+        return None;
+    }
+    let mut r = rest;
+    while let Some(x) = r.strip_prefix('>') {
+        r = x.trim_start_matches([' ', '\t']);
+    }
+    Some(r)
+}
+
+/// Whether the line has a `|` that is not escaped as `\|`.
+fn has_unescaped_pipe(line: &str) -> bool {
+    let b = line.as_bytes();
+    (0..b.len()).any(|i| b[i] == b'|' && (i == 0 || b[i - 1] != b'\\'))
+}
+
+fn org_block_start(line: &str) -> bool {
+    line.trim_start_matches([' ', '\t']).to_ascii_lowercase().starts_with("#+begin_")
+}
+
+fn org_block_end(line: &str) -> bool {
+    line.trim_start_matches([' ', '\t']).to_ascii_lowercase().starts_with("#+end_")
+}
+
+/// The formula lines under a table that ends before line `end`. Org: the
+/// `#+TBLFM:` line directly under the table (Org 9.8.7 does not read one
+/// after a blank line). Markdown: `<!-- TBLFM: ... -->` lines, after any
+/// blank lines (`unquote` strips a block-quote prefix first).
+fn formula_lines(lines: &[&str], end: usize, dialect: Dialect, unquote: bool) -> (Option<String>, bool) {
+    let get = |k: usize| -> Option<&str> {
+        let l = *lines.get(k)?;
+        if unquote {
+            md_unquote(l)
+        } else {
+            Some(l)
+        }
+    };
+    match dialect {
         Dialect::Org => {
-            let lower = t.to_ascii_lowercase();
-            if lower.starts_with("#+begin_") {
-                Some("#+end_".to_string())
+            let tblfm = get(end)
+                .and_then(|l| tblfm_org_re().captures(l))
+                .map(|c| c.get(1).map_or("", |m| m.as_str()).to_string());
+            (tblfm, false)
+        }
+        Dialect::Markdown => {
+            let mut j = end;
+            while get(j).is_some_and(is_blank) {
+                j += 1;
+            }
+            let mut parts = Vec::new();
+            let mut k = j;
+            while let Some(c) = get(k).and_then(|l| tblfm_md_re().captures(l)) {
+                parts.push(c.get(1).map_or("", |m| m.as_str()).to_string());
+                k += 1;
+            }
+            if !parts.is_empty() {
+                (Some(parts.join("::")), false)
             } else {
-                None
+                (None, get(j).is_some_and(|l| tblfm_org_re().is_match(l)))
             }
         }
     }
 }
 
-/// Find the tables of a block. Tables inside code fences (Markdown) or
-/// `#+BEGIN_...` blocks (Org) are not tables.
+/// Why a Markdown pipe block cannot be recalculated safely, if it cannot:
+/// it is not a GFM table, or its extent depends on Markdown structure the
+/// plugin does not parse (review finding F7).
+fn md_table_problem(lines: &[&str], start: usize, end: usize) -> Option<String> {
+    let run = &lines[start..end];
+    if run.iter().any(|l| indent_of(l).0 > 3) {
+        return Some("a table line is indented by four or more spaces (Markdown reads it as code)".into());
+    }
+    let header = split_row(run[0], Dialect::Markdown);
+    let valid_delim = run.len() >= 2
+        && gfm_delimiter_re().is_match(run[1])
+        && split_row(run[1], Dialect::Markdown).len() == header.len();
+    if !valid_delim {
+        return Some(
+            "not a Markdown table: it needs a header row, then a delimiter row such as `|---|---|` with as many cells"
+                .into(),
+        );
+    }
+    if run[2..].iter().any(|l| split_row(l, Dialect::Markdown).len() > header.len()) {
+        return Some("a row has more cells than the header (Markdown ignores the extra cells)".into());
+    }
+    let one_line_comment = |l: &str| {
+        let (ind, rest) = indent_of(l);
+        ind <= 3 && rest.starts_with("<!--") && rest[4..].contains("-->")
+    };
+    if start > 0 && has_unescaped_pipe(lines[start - 1]) && !one_line_comment(lines[start - 1]) {
+        return Some("the line above the table has a `|` but does not start with one; where the table begins is unclear".into());
+    }
+    // Inside an HTML block (it runs to the next blank line), a pipe table is
+    // literal text. A one-line `<!-- ... -->` comment ends its own block.
+    let mut k = start;
+    while k > 0 && !is_blank(lines[k - 1]) {
+        k -= 1;
+        if one_line_comment(lines[k]) {
+            break;
+        }
+        let (ind, rest) = indent_of(lines[k]);
+        if ind <= 3 && rest.starts_with('<') {
+            return Some("the table follows an HTML line without a blank line; Markdown may read it as HTML".into());
+        }
+    }
+    None
+}
+
+/// Find the tables of a block. Tables inside code fences or HTML blocks
+/// (Markdown) or `#+BEGIN_...` blocks (Org) are not tables. A Markdown pipe
+/// block whose extent cannot be determined is returned with
+/// [`Found::decline`] set.
 pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
     let mut out = Vec::new();
     let mut i = 0;
-    let mut fence: Option<String> = None;
+    // Markdown: an open code fence or HTML block (with its end marker);
+    // Org: an open `#+BEGIN_` block.
+    let mut fence: Option<(char, usize)> = None;
+    let mut html_end: Option<&'static str> = None;
+    let mut org_block = false;
     while i < lines.len() {
         let line = lines[i];
-        if let Some(f) = &fence {
-            let t = line.trim_start_matches([' ', '\t']);
-            let closes = match dialect {
-                Dialect::Markdown => t.starts_with(f.as_str()),
-                Dialect::Org => t.to_ascii_lowercase().starts_with("#+end_"),
-            };
-            if closes {
-                fence = None;
+        match dialect {
+            Dialect::Org => {
+                if org_block {
+                    org_block = !org_block_end(line);
+                    i += 1;
+                    continue;
+                }
+                if org_block_start(line) {
+                    org_block = true;
+                    i += 1;
+                    continue;
+                }
             }
-            i += 1;
-            continue;
-        }
-        if let Some(f) = fence_marker(line, dialect) {
-            fence = Some(f);
-            i += 1;
-            continue;
+            Dialect::Markdown => {
+                if let Some((ch, n)) = fence {
+                    if md_closing_fence(line, ch, n) {
+                        fence = None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if let Some(end) = html_end {
+                    if line.to_ascii_lowercase().contains(end) {
+                        html_end = None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if let Some(f) = md_opening_fence(line) {
+                    fence = Some(f);
+                    i += 1;
+                    continue;
+                }
+                if let Some(end) = md_html_block_start(line) {
+                    html_end = end;
+                    i += 1;
+                    continue;
+                }
+                if md_unquote(line).is_some_and(|r| r.starts_with('|')) {
+                    let start = i;
+                    while i < lines.len() && md_unquote(lines[i]).is_some_and(|r| r.starts_with('|')) {
+                        i += 1;
+                    }
+                    let (tblfm, md_has_org_tblfm) = formula_lines(lines, i, dialect, true);
+                    out.push(Found {
+                        start,
+                        end: i,
+                        tblfm,
+                        md_has_org_tblfm,
+                        decline: Some("tables inside a block quote are not supported".into()),
+                    });
+                    continue;
+                }
+            }
         }
         if !is_table_line(line) {
             i += 1;
@@ -139,33 +346,12 @@ pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
             i += 1;
         }
         let end = i;
-        let mut j = end;
-        while j < lines.len() && is_blank(lines[j]) {
-            j += 1;
-        }
-        let mut tblfm = None;
-        let mut md_has_org_tblfm = false;
-        match dialect {
-            Dialect::Org => {
-                if let Some(c) = lines.get(j).and_then(|l| tblfm_org_re().captures(l)) {
-                    tblfm = Some(c.get(1).map_or("", |m| m.as_str()).to_string());
-                }
-            }
-            Dialect::Markdown => {
-                let mut parts = Vec::new();
-                let mut k = j;
-                while let Some(c) = lines.get(k).and_then(|l| tblfm_md_re().captures(l)) {
-                    parts.push(c.get(1).map_or("", |m| m.as_str()).to_string());
-                    k += 1;
-                }
-                if !parts.is_empty() {
-                    tblfm = Some(parts.join("::"));
-                } else if lines.get(j).is_some_and(|l| tblfm_org_re().is_match(l)) {
-                    md_has_org_tblfm = true;
-                }
-            }
-        }
-        out.push(Found { start, end, tblfm, md_has_org_tblfm });
+        let (tblfm, md_has_org_tblfm) = formula_lines(lines, end, dialect, false);
+        let decline = match dialect {
+            Dialect::Markdown => md_table_problem(lines, start, end),
+            Dialect::Org => None,
+        };
+        out.push(Found { start, end, tblfm, md_has_org_tblfm, decline });
     }
     out
 }
@@ -226,17 +412,21 @@ pub fn parse_table(lines: &[&str], dialect: Dialect) -> Table {
     let mut md_delimiter = None;
     for (n, l) in lines.iter().enumerate() {
         let t = l.trim_start_matches([' ', '\t']);
-        if t.starts_with("|-") {
-            out.push(Line::Hline);
-            if dialect == Dialect::Markdown && n == 1 && gfm_delimiter_re().is_match(l) {
-                md_delimiter = Some(split_row(l, dialect).iter().map(|c| md_align_of(c)).collect());
+        match dialect {
+            // Org: every line starting with `|-` is a rule.
+            Dialect::Org if t.starts_with("|-") => {
+                out.push(Line::Hline);
+                continue;
             }
-            continue;
-        }
-        if dialect == Dialect::Markdown && n == 1 && gfm_delimiter_re().is_match(l) {
-            out.push(Line::Hline);
-            md_delimiter = Some(split_row(l, dialect).iter().map(|c| md_align_of(c)).collect());
-            continue;
+            // Markdown: only the delimiter row (line 2, checked by
+            // `find_tables`) is a rule; every later row is data, even
+            // `|-5|` or `|---|` (review finding F2).
+            Dialect::Markdown if n == 1 && gfm_delimiter_re().is_match(l) => {
+                out.push(Line::Hline);
+                md_delimiter = Some(split_row(l, dialect).iter().map(|c| md_align_of(c)).collect());
+                continue;
+            }
+            _ => {}
         }
         out.push(Line::Data(split_row(l, dialect)));
     }
@@ -286,6 +476,28 @@ impl Table {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    /// [`Table::render`], unless the aligned table would clearly be larger
+    /// than `limit` (UTF-16 units; the estimate counts display columns, so
+    /// the caller still checks the exact size). Padding a compact ragged
+    /// table into a rectangle can multiply its size; this refuses before
+    /// allocating it.
+    pub fn render_checked(&self, limit: usize) -> Option<Vec<String>> {
+        let ncols = self.ncols().max(1);
+        let mut widths = vec![1usize; ncols];
+        for l in &self.lines {
+            if let Line::Data(f) = l {
+                for (c, cell) in f.iter().enumerate() {
+                    widths[c] = widths[c].max(cell_width(cell, self.dialect));
+                }
+            }
+        }
+        let per_line = widths.iter().fold(self.indent.len() + 1, |a, w| a.saturating_add(w + 3));
+        if per_line.saturating_mul(self.lines.len()) > limit.saturating_mul(2) {
+            return None;
+        }
+        Some(self.render())
     }
 
     /// Render the table aligned: every data row padded to the widest row,
@@ -427,8 +639,14 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!((f[0].start, f[0].end), (1, 3));
         assert_eq!(f[0].tblfm.as_deref(), Some("$1=2::@1$1=3"));
-        let org = ["| a |", "", "#+tblfm: $1=1"];
+        let org = ["| a |", "#+tblfm: $1=1"];
         let f = find_tables(&org, Dialect::Org);
         assert_eq!(f[0].tblfm.as_deref(), Some("$1=1"));
+        // Org 9.8.7 does not read a `#+TBLFM:` line after a blank line
+        // (Emacs oracle case r1-org-tblfm-after-blank); this expectation was
+        // `Some` before review round 1, which wrote where Org does not.
+        let org = ["| a |", "", "#+tblfm: $1=1"];
+        let f = find_tables(&org, Dialect::Org);
+        assert_eq!(f[0].tblfm, None);
     }
 }
