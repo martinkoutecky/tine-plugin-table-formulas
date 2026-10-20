@@ -353,7 +353,70 @@ pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
         };
         out.push(Found { start, end, tblfm, md_has_org_tblfm, decline });
     }
+    if let Some(why) = block_uncertainty(lines, dialect) {
+        for f in out.iter_mut().filter(|f| f.decline.is_none()) {
+            f.decline = Some(why.clone());
+        }
+    }
     out
+}
+
+/// A line with its leading whitespace, list markers and block-quote markers
+/// removed: what a fence or an HTML tag could start with in a list item or
+/// its continuation.
+fn strip_container_markers(line: &str) -> &str {
+    let mut r = line.trim_start();
+    loop {
+        let before = r;
+        if let Some(x) = r.strip_prefix(['-', '*', '+', '>']) {
+            if x.is_empty() || x.starts_with(char::is_whitespace) || r.starts_with('>') {
+                r = x.trim_start();
+            }
+        } else {
+            let digits = r.bytes().take_while(u8::is_ascii_digit).count();
+            if (1..=9).contains(&digits) {
+                if let Some(x) = r[digits..].strip_prefix(['.', ')']) {
+                    if x.is_empty() || x.starts_with(char::is_whitespace) {
+                        r = x.trim_start();
+                    }
+                }
+            }
+        }
+        if r.len() == before.len() {
+            return r;
+        }
+    }
+}
+
+/// Why the plugin cannot be sure that any table of this block is a table in
+/// Tine's own parse (review round 2, B1/B2). The plugin cannot see that
+/// parse, so it declines the whole block when:
+/// - any line looks like a code fence (` ``` ` or `~~~`), at any indentation,
+///   tabs and list items included: Tine's parser may read the pipe lines as
+///   source code even where CommonMark would not;
+/// - (Markdown) any line other than a formula comment starts like an HTML
+///   block or tag (`<x`, `</x`, `<!`, `<?`): an enclosing HTML block can make
+///   the table literal text, and an inner comment does not end it.
+fn block_uncertainty(lines: &[&str], dialect: Dialect) -> Option<String> {
+    for (n, line) in lines.iter().enumerate() {
+        let r = strip_container_markers(line);
+        if r.starts_with("```") || r.starts_with("~~~") {
+            return Some(format!(
+                "line {} of the block looks like a code fence; the plugin cannot tell whether Tine shows the table as a table or as code",
+                n + 1
+            ));
+        }
+        if dialect == Dialect::Markdown && !tblfm_md_re().is_match(line) {
+            let mut c = r.chars();
+            if c.next() == Some('<') && c.next().is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) {
+                return Some(format!(
+                    "line {} of the block is HTML; the plugin cannot tell whether Tine shows the table as a table or as HTML",
+                    n + 1
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Split a table row into trimmed fields, the way `org-table-to-lisp` does:

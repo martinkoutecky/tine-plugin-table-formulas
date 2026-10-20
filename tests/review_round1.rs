@@ -60,10 +60,18 @@ fn f7_backtick_line_with_text_does_not_close_a_fence() {
 
 #[test]
 fn f7_a_real_closing_fence_ends_the_code() {
+    // Fence tracking still ends the code at the real closing fence, so the
+    // table after it is found. Since review round 2 (B2) any fence-like line
+    // declines the block's tables: the plugin cannot see Tine's parse.
     let raw = "~~~~\ncode\n~~~~~ \n| a | b |\n|---|---|\n| 1 | |\n<!-- TBLFM: $2=$1+1 -->";
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let found = tine_plugin_table_formulas::table::find_tables(&lines, Dialect::Markdown);
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].start, found[0].end), (3, 6));
+    assert!(found[0].decline.as_deref().is_some_and(|w| w.contains("code fence")));
     let (out, skipped) = md(raw);
-    assert!(skipped.is_empty(), "{skipped:?}");
-    assert_eq!(out, "~~~~\ncode\n~~~~~ \n| a | b |\n| - | - |\n| 1 | 2 |\n<!-- TBLFM: $2=$1+1 -->");
+    assert_eq!(out, raw);
+    assert_eq!(skipped.len(), 1);
 }
 
 #[test]
@@ -103,7 +111,15 @@ fn f7_tables_inside_html_comments_and_raw_blocks_are_literal() {
 
 #[test]
 fn f7_a_one_line_comment_above_a_table_is_fine() {
+    // Round 1 accepted a one-line comment above a table. Review round 2 (B1)
+    // showed an inner comment can hide an enclosing HTML block, so any HTML
+    // line other than a formula comment now declines the block; only the
+    // formula comment itself is not HTML context.
     let raw = "<!-- note -->\n| a | b |\n|---|---|\n| 1 | |\n<!-- TBLFM: $2=$1+1 -->";
+    let (out, skipped) = md(raw);
+    assert_eq!(out, raw);
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    let raw = "| a | b |\n|---|---|\n| 1 | |\n<!-- TBLFM: $2=$1+1 -->";
     let (out, skipped) = md(raw);
     assert!(skipped.is_empty(), "{skipped:?}");
     assert!(out.contains("| 1 | 2 |"), "{out}");

@@ -191,7 +191,8 @@ impl<'a> Engine<'a> {
 
     fn row_type(&self, want_hline: bool, n: usize, start: i64, backwards: bool, desc: &str, f: &str) -> Result<usize, Abort> {
         let l = self.types.len() as i64;
-        if n as i64 >= l {
+        // A count that does not fit in i64 must not wrap (review round 2).
+        if i64::try_from(n).map_or(true, |n| n >= l) {
             // Each step moves at least one line, so this count cannot stay
             // inside the table (and looping it would not end in time).
             return abort(Some(f), format!("row descriptor {desc} leads outside the table"));
@@ -261,17 +262,18 @@ impl<'a> Engine<'a> {
         Ok(Some(cline as usize))
     }
 
-    fn column_of(spec: Option<&str>, col: i64) -> i64 {
-        let Some(s) = spec else { return col };
+    /// `None`: the column number cannot be read exactly (callers refuse).
+    fn column_of(spec: Option<&str>, col: i64) -> Option<i64> {
+        let Some(s) = spec else { return Some(col) };
         let s = &s[1..]; // drop `$`
-        let n = printf::small_int(s);
-        if n == 0 {
+        let n = printf::small_int(s)?;
+        Some(if n == 0 {
             col
         } else if s.starts_with(['-', '+']) {
             n + col
         } else {
             n
-        }
+        })
     }
 
     /// `org-table-get-range`. With `corners`, returns the rectangle's lines
@@ -352,8 +354,10 @@ impl<'a> Engine<'a> {
         };
         let r1 = line_of(c.get(1))?;
         let r2 = line_of(c.get(4))?;
-        let c1 = Self::column_of(c.get(2).map(|m| m.as_str()), col);
-        let c2 = Self::column_of(c.get(5).map(|m| m.as_str()), col);
+        let unreadable =
+            || Abort { formula: Some(f.to_string()), message: format!("the column number in `{desc}` cannot be read exactly") };
+        let c1 = Self::column_of(c.get(2).map(|m| m.as_str()), col).ok_or_else(unreadable)?;
+        let c2 = Self::column_of(c.get(5).map(|m| m.as_str()), col).ok_or_else(unreadable)?;
         Ok((r1, c1, r2, c2, rangep))
     }
 
@@ -496,7 +500,9 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
             let num = re(&NUM, r"([pnfse])(-?[0-9]+)");
             while let Some(c) = num.captures(&fmt) {
                 let letter = c.get(1).map_or("", |m| m.as_str());
-                let n: i64 = printf::small_int(c.get(2).map_or("0", |m| m.as_str()));
+                let Some(n) = printf::small_int(c.get(2).map_or("0", |m| m.as_str())) else {
+                    return Err(format!("mode number `{}` cannot be read exactly", c.get(0).map_or("", |m| m.as_str())));
+                };
                 match letter {
                     "p" => {
                         if !(3..=200).contains(&n) {
@@ -614,9 +620,12 @@ impl<'a> Engine<'a> {
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
             }
-            let num = |g: usize| -> i64 { printf::small_int(c.get(g).map_or("0", |m| m.as_str())) };
-            let a = num(1) - 1 + if c.get(2).is_some() { n0 as i64 } else { 0 };
-            let b = num(3) + if c.get(4).is_some() { n0 as i64 } else { 0 };
+            let num = |g: usize| printf::small_int(c.get(g).map_or("0", |m| m.as_str()));
+            let (Some(na), Some(nb)) = (num(1), num(3)) else {
+                return Ok(EvalResult::Skip("a column number cannot be read exactly".into()));
+            };
+            let a = na - 1 + if c.get(2).is_some() { n0 as i64 } else { 0 };
+            let b = nb + if c.get(4).is_some() { n0 as i64 } else { 0 };
             if a < 0 || b > fields.len() as i64 || a > b {
                 return abort(Some(f), format!("range {} is outside the row", c.get(0).map_or("", |m| m.as_str())));
             }
@@ -641,7 +650,9 @@ impl<'a> Engine<'a> {
                 return abort(Some(f), "too many references");
             }
             let raw = c.get(1).map_or("0", |m| m.as_str());
-            let mut n = printf::small_int(raw);
+            let Some(mut n) = printf::small_int(raw) else {
+                return Ok(EvalResult::Skip(format!("the column number `${raw}` cannot be read exactly")));
+            };
             if c.get(2).is_some() {
                 n += n0 as i64;
             }

@@ -67,7 +67,7 @@ fn org_mode_corpus() {
     let expectations = load("expectations.json");
     let mut cases: Vec<Value> = Vec::new();
     let mut revisions = Vec::new();
-    for file in ["org-table-tests.json", "org-table-tests-manual.json", "emacs-oracle.json", "emacs-oracle-r1.json"] {
+    for file in ["org-table-tests.json", "org-table-tests-manual.json", "emacs-oracle.json", "emacs-oracle-r1.json", "emacs-oracle-r2.json"] {
         let v = load(file);
         revisions.push(v["revision"].as_str().unwrap_or("?").to_string());
         cases.extend(v["cases"].as_array().cloned().unwrap_or_default());

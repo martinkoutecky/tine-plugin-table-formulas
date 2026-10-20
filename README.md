@@ -31,15 +31,17 @@ Install and enable the plugin, edit a block with a table, then press `Ctrl+Alt+R
 Where the formulas go:
 
 - **Org blocks:** a `#+TBLFM:` line on the line right after the table, as in Org (Org ignores one after a blank line, and so does the plugin). Separate several formulas with `::`.
-- **Markdown blocks:** one or more `<!-- TBLFM: ... -->` lines under the table (blank lines between the table and the first comment are allowed). This is the form Kalem's Markdown table formulas use. Tine does not show HTML comments, so the formula line stays out of the rendered page. Consecutive comment lines are joined with `::`. A `#+TBLFM:` line under a Markdown table is not read; whenever the block has one, the notice says so.
+- **Markdown blocks:** one or more `<!-- TBLFM: ... -->` lines under the table (blank lines between the table and the first comment are allowed). This is the form Kalem's Markdown table formulas use. Tine does not show HTML comments, so the formula line stays out of the rendered page. Consecutive comment lines are joined with `::`. A `#+TBLFM:` line under a Markdown table is not read; when a table has one in place of a comment line, the notice says so (a `#+TBLFM:` line after the comment lines gets no hint).
 
 A Markdown table needs a header row and a delimiter row (`|---|---|`) with the same number of cells, and every line of it must start with `|`. The plugin leaves alone, with a notice, the tables it cannot delimit with certainty: tables in a block quote, tables indented as code, tables whose rows mix leading and missing outer pipes, pipe lines with no valid header and delimiter pair, and tables with a body row wider than the header. Pipe lines inside fenced code or inside HTML blocks (such as `<pre>` or a multi-line comment) are text, not tables, and are never touched.
+
+The plugin cannot see how Tine itself parses the block, so it is conservative about context. If any line of the block looks like a code fence (` ``` ` or `~~~`, at any indentation, also in a list item), or (in Markdown) any line other than the formula comments starts like HTML (`<div>`, `</div>`, `<!-- ... -->`, `<?...`), every table in the block is left unchanged, with a notice. Move the table into a block of its own to recalculate it.
 
 A Markdown table's delimiter row (`|---|---|`) counts as Org's first horizontal line. `@1` is therefore the header row, `@I` is the delimiter, and column formulas skip the header, as they do in Org. It is the only rule in a Markdown table: a body row such as `|-5|7|` is data. Org-style `|---+---|` lines are horizontal lines only in Org tables.
 
 One run is one recalculation pass, like `C-c C-c` in Org. As in Org, the formulas run sorted by their left-hand side, column formulas first and field formulas after them, not in the order they are written; reordering the `::` entries or the comment lines does not change the order. If a formula feeds one that runs before it, run the command again.
 
-**All or nothing per table.** If the plugin cannot match Org on any formula of a table (a feature from the right-hand column below, a result it cannot format exactly, a reference to an empty or crossed range), it leaves the whole table unchanged and the notice names the formula and the reason. Other tables in the same block are still recalculated.
+**All or nothing per table.** If the plugin cannot match Org on any formula of a table (a feature from the right-hand column below, a result it cannot format exactly, a reference to an empty or crossed range), it leaves the whole table unchanged and the notice names the formula and the reason. Atomicity is per table: other tables in the same block are still recalculated, unless the block itself is declined as described above.
 
 ## What is supported
 
@@ -67,7 +69,7 @@ Where Org itself writes `#ERROR` into a cell (for example `$2=$1+`, which Calc c
 
 A formula that Org rejects outright (an unknown column, a row past the table, two formulas for the same field) stops the command: the notice names the formula and nothing in the block changes. Org edits the table partly before it stops; this plugin writes nothing.
 
-The plugin also has its own limits, so a pathological formula fails fast instead of running into Tine's 250 ms plugin timeout: nesting depth 200, 100,000 fields per range, a bounded amount of evaluation work per block, integers up to 2000 digits, and Tine's 128 KiB block limit for the result. A table over a limit is left unchanged with a notice.
+The plugin also has its own limits, meant to stop a pathological formula before Tine's 250 ms plugin timeout (the slowest measured refusal took about 160 ms in the release build): nesting depth 200, 100,000 fields per range, a bounded amount of evaluation work per table, integers up to 2000 digits, and Tine's 128 KiB block limit for the result. A table over a limit is left unchanged with a notice.
 
 Alignment pads by the display width that Unicode assigns to each character. Emacs measures some text differently, notably tabs inside a cell and emoji joined with a zero-width joiner (such as 👩‍💻); in a table that contains them the padding can differ from Org's by a few spaces. The values written are the same.
 
@@ -91,9 +93,9 @@ Build with `cargo build --release`, then run Tine's `plugin:check` on this direc
 - `tests/fixtures/org-table-tests.json`: extracted from org-mode's `testing/lisp/test-org-table.el` by `tools/extract-org-fixtures.py`, which reads the Lisp as data and runs nothing;
 - `tests/fixtures/org-table-tests-manual.json`: the other formula tests of that file, transcribed by hand;
 - `tests/fixtures/emacs-oracle.json`: cases run through Emacs with `tools/emacs-oracle.el`;
-- `tests/fixtures/emacs-oracle-r1.json` and `tests/fixtures/emacs-printf.json`: the review-round cases and a printf sample (4,500 pairs drawn from an 86,025-pair flag/width/precision grid), computed by Emacs;
+- `tests/fixtures/emacs-oracle-r1.json`, `tests/fixtures/emacs-oracle-r2.json` and `tests/fixtures/emacs-printf.json`: the review-round cases and a printf sample (4,510 pairs drawn from an 86,025-pair flag/width/precision grid), computed by Emacs;
 - `tests/fixtures/expectations.json`: every fixture case the plugin declines, with the reason. It lists fixture cases, not every input the evaluator declines. A declined case must produce a notice and leave the block byte for byte unchanged; every other case must equal Org's output.
 
-The plugin asks for two capabilities: registering its command, and writing the focused block. Tine hands it only the focused block's id, text and format; it cannot read other blocks, files or the network. The change is a single expected-text replacement: Tine applies it only if the block still holds the text the plugin read. It is one Undo step and goes through Tine's normal conflict-safe save path. Text outside the recalculated tables is kept byte for byte, line endings included.
+The plugin asks for two capabilities: registering its command, and writing the focused block. Tine hands it only the focused block's id, text and format; it cannot read other blocks, files or the network. The change is a single expected-text replacement: Tine applies it only if the block still holds the text the plugin read. It is one Undo step and goes through Tine's normal conflict-safe save path. Text outside the recalculated tables is kept byte for byte, line endings included. This depends on the plugin finding the same tables Tine does; where it cannot be sure, it declines (see above).
 
 No Org, Emacs or Calc code was copied. The plugin was written from the documented behaviour and checked against the upstream test suite and against Emacs. This AI-primary plugin is MIT-licensed; see `LICENSE`.

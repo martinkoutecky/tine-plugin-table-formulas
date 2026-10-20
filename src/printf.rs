@@ -27,11 +27,26 @@ impl LispNum {
 
 /// A column number, mode digit count or similar small integer written as
 /// `[-+]?[0-9]+`: read with `string-to-number` semantics but saturated to
-/// +-1_000_000, which is far outside every table and every budget.
-pub fn small_int(s: &str) -> i64 {
-    match string_to_number(s) {
-        Some(LispNum::Int(v)) => v.to_i64().unwrap_or(if v.is_negative() { i64::MIN } else { i64::MAX }).clamp(-1_000_000, 1_000_000),
-        _ => 0,
+/// +-1_000_000, which is far outside every table and every budget. Leading
+/// zeros are read exactly, however many there are (Org reads `$0001` as
+/// column 1). `None` means the text is not such an integer or cannot be read
+/// exactly; callers must decline, never treat it as 0 (review round 2, B3).
+pub fn small_int(s: &str) -> Option<i64> {
+    const CAP: i64 = 1_000_000;
+    let t = s.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
+    let (neg, digits) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        let sig = digits.trim_start_matches('0');
+        let v = if sig.len() > 7 { CAP } else { sig.parse::<i64>().unwrap_or(0).min(CAP) };
+        return Some(if neg { -v } else { v });
+    }
+    match string_to_number(s)? {
+        LispNum::Int(v) => Some(v.to_i64().unwrap_or(if v.is_negative() { -CAP } else { CAP }).clamp(-CAP, CAP)),
+        LispNum::Float(_) => None,
     }
 }
 
