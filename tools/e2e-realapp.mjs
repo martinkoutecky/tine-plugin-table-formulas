@@ -2,13 +2,14 @@
 // Pattern copied from tine-og/scripts/e2e-plugin-graph-ownership.mjs; nothing in tine-og is edited.
 //
 //   TINE_APP=<tine binary> TINE_OG=<a Tine checkout> \
-//   [E2E_TMP_DIR=...] xvfb-run -a -s "-screen 0 1920x1080x24" node tools/e2e-realapp.mjs
+//   [E2E_TMP_DIR=<missing or empty dir>] xvfb-run -a -s "-screen 0 1920x1080x24" node tools/e2e-realapp.mjs
 //
 // Run it under `bwrap --dev-bind / / --bind <scratch> $HOME` so a stray write can never reach real app data.
 // All state (graph, XDG dirs) lives under E2E_TMP_DIR; the plugin is seeded into the app-data dir exactly as
 // the ownership journey does, so no signed registry is needed.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -27,7 +28,20 @@ const TD = process.env.TAURI_DRIVER || "tauri-driver";
 const WD = process.env.WEBKIT_DRIVER || "/usr/bin/WebKitWebDriver";
 const DRIVER_PORT = Number(process.env.E2E_DRIVER_PORT || 4510);
 const NATIVE_PORT = Number(process.env.E2E_NATIVE_PORT || 4511);
-const TMP = process.env.E2E_TMP_DIR || "/tmp/tine-table-formulas-e2e";
+// The state directory: a fresh one under the system temp dir, or E2E_TMP_DIR,
+// which must be missing or empty. Nothing is ever deleted recursively: a
+// configured path could hold anything.
+function stateDir() {
+  const dir = process.env.E2E_TMP_DIR;
+  if (!dir) return fs.mkdtempSync(path.join(os.tmpdir(), "tine-table-formulas-e2e-"));
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length > 0) {
+    throw new Error(`E2E_TMP_DIR ${dir} is not empty; give a missing or empty directory`);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+const TMP = stateDir();
+console.log(`state in ${TMP}`);
 const GRAPH = path.join(TMP, "graph");
 const XDG = path.join(TMP, "xdg");
 
@@ -62,7 +76,6 @@ const ORG_SRC = [
   "",
 ].join("\n");
 
-fs.rmSync(TMP, { recursive: true, force: true });
 for (const d of ["pages", "journals", "logseq"]) fs.mkdirSync(path.join(GRAPH, d), { recursive: true });
 fs.writeFileSync(path.join(GRAPH, "logseq", "config.edn"), "{}\n");
 fs.writeFileSync(path.join(GRAPH, "pages", "Md Table.md"), MD_SRC);
