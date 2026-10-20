@@ -244,3 +244,61 @@ fn many_declined_tables_keep_a_short_report() {
     assert_eq!(report.declined_tables, 3000);
     assert!(report.skipped.len() <= 32, "{}", report.skipped.len());
 }
+
+// ---- 6. Backslashes before a separator (registry audit of fae8255).
+
+#[test]
+fn markdown_results_with_a_backslash_are_declined() {
+    // `1\` written before ` |`: Markdown may read `\|` as an escaped pipe.
+    for f in [r"$2=$1;\", r"$2=$1;%d\", r"$2=$1;%d\x"] {
+        let raw = format!("| a | b |\n|---|---|\n| 1 | |\n<!-- TBLFM: {f} -->");
+        assert_declined(&raw, Dialect::Markdown, 30, "backslash");
+    }
+}
+
+/// Org splits on every `|`; Org 9.8.7 (Emacs 31.1, 2026-10-20) writes these.
+#[test]
+fn org_results_with_a_backslash_match_emacs() {
+    for (f, cell) in [
+        (r"$2=$1;%d\", r"1\"),
+        (r"$2=$1;\", r"\"),
+        (r"$2=$1;%d\x", r"1\x"),
+    ] {
+        let (out, report) = run(&format!("| 1 | |\n#+TBLFM: {f}"), Dialect::Org, 30);
+        assert!(report.skipped.is_empty(), "{f}: {:?}", report.skipped);
+        assert_eq!(out, format!("| 1 | {cell} |\n#+TBLFM: {f}"));
+    }
+}
+
+#[test]
+fn an_untouched_trailing_backslash_keeps_its_cell() {
+    let (out, report) = run(
+        "| a | b |\n|---|---|\n| x\\ | |\n<!-- TBLFM: $2=1 -->",
+        Dialect::Markdown,
+        30,
+    );
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert_eq!(
+        out,
+        "| a  | b |\n| -- | - |\n| x\\ | 1 |\n<!-- TBLFM: $2=1 -->"
+    );
+}
+
+#[test]
+fn a_rendered_row_that_splits_differently_does_not_read_back() {
+    use tine_plugin_table_formulas::table::parse_table;
+    let t = parse_table(
+        &["| a | b |", "|---|---|", "| x\\ | y |"],
+        Dialect::Markdown,
+    );
+    let good: Vec<String> = t.render();
+    assert!(t.reads_back(&good), "{good:?}");
+    // The backslash right before the separator escapes it: one cell, not two.
+    let merged: Vec<String> = ["| a | b |", "| - | - |", "| x\\| y |"]
+        .map(String::from)
+        .into();
+    assert!(!t.reads_back(&merged));
+    let org = parse_table(&["| 1 | 2 |"], Dialect::Org);
+    assert!(!org.reads_back(&["| 1 | 2 | 3 |".to_string()]));
+    assert!(org.reads_back(&org.render()));
+}

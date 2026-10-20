@@ -192,8 +192,10 @@ pub const EVAL_WORK: usize = 2;
 /// two `@#`/`$#` rewrites, the date check), charged up front; the loops that
 /// substitute references and remove mode letters charge each round.
 const PRE_SCANS: u64 = 8;
-/// Work for one field read through a reference, in units.
-const FIELD_UNITS: usize = 1;
+/// Work for one field read through a reference, in ticks: the lookup and
+/// bookkeeping. Copying its text, substituting it into the formula and
+/// evaluating it are charged where they happen.
+const FIELD_TICKS: u64 = 192;
 /// Length of one formula after its references are substituted.
 pub const MAX_EXPANDED_FORMULA: usize = 256 * 1024;
 
@@ -416,7 +418,7 @@ impl<'a> Engine<'a> {
                 "the range {desc} covers more than {MAX_RANGE_FIELDS} fields"
             )));
         }
-        if !work::units(area.saturating_mul(FIELD_UNITS)) {
+        if !work::ticks((area as u64).saturating_mul(FIELD_TICKS)) {
             return Ok(RangeVal::Decline(WORK_REASON.into()));
         }
         let mut out = Vec::with_capacity(area);
@@ -879,7 +881,7 @@ impl<'a> Engine<'a> {
                 );
             }
             let slice = &fields[a as usize..b as usize];
-            if !work::units(slice.len() * FIELD_UNITS)
+            if !work::ticks(slice.len() as u64 * FIELD_TICKS)
                 || !work::text(slice.iter().map(String::len).sum())
             {
                 return over();
@@ -912,7 +914,7 @@ impl<'a> Engine<'a> {
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
             }
-            if !work::units(FIELD_UNITS) {
+            if !work::ticks(FIELD_TICKS) {
                 return over();
             }
             let raw = c.get(1).map_or("0", |m| m.as_str());
@@ -999,6 +1001,15 @@ impl<'a> Engine<'a> {
         }
         if out.contains('|') {
             return Ok(EvalResult::Skip("the result contains `|`".into()));
+        }
+        // Markdown: a backslash in a written cell can escape the `|` after
+        // it (`\|`), merging two cells. Org splits on every `|`, and Org
+        // 9.8.7 writes the backslash as is (oracle, 2026-10-20), as here.
+        if self.table.dialect == crate::table::Dialect::Markdown && out.contains('\\') {
+            return Ok(EvalResult::Skip(
+                "the result contains a backslash, which Markdown could read as escaping the next `|`"
+                    .into(),
+            ));
         }
         // No value computed past the budget is written.
         if work::exhausted() {

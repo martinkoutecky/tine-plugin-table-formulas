@@ -39,7 +39,7 @@ The plugin cannot see how Tine itself parses the block, so it is conservative ab
 
 A Markdown table's delimiter row (`|---|---|`) counts as Org's first horizontal line. `@1` is therefore the header row, `@I` is the delimiter, and column formulas skip the header, as they do in Org. It is the only rule in a Markdown table: a body row such as `|-5|7|` is data. Org-style `|---+---|` lines are horizontal lines only in Org tables.
 
-A Markdown table keeps the columns of its header. In Org, a column formula past the last column (`$3=7` in a two-column table) widens the table; in Markdown that would leave the header and delimiter rows short, so the plugin leaves the table unchanged with a notice when any formula would write past the header's column count. A body row shorter than the header still gets its missing cells.
+A Markdown table keeps the columns of its header. In Org, a column formula past the last column (`$3=7` in a two-column table) widens the table; in Markdown that would leave the header and delimiter rows short, so the plugin leaves the table unchanged with a notice when any formula would write past the header's column count. A body row shorter than the header still gets its missing cells. A result containing a backslash is not written in Markdown (it could escape the `|` after it), and every aligned table must read back as the same cells before it is written.
 
 One run is one recalculation pass, like `C-c C-c` in Org. As in Org, the formulas run sorted by their left-hand side, column formulas first and field formulas after them, not in the order they are written; reordering the `::` entries or the comment lines does not change the order. If a formula feeds one that runs before it, run the command again.
 

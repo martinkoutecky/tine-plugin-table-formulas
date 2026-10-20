@@ -611,6 +611,56 @@ fn cookie_re() -> &'static Regex {
 }
 
 impl Table {
+    /// Whether `rendered` (this table aligned, without line endings) reads
+    /// back as this table: one table over all of its lines, the same rules
+    /// and Markdown alignments, and in every data row the same cells (as
+    /// trimmed text, padded to the table's width). An end-to-end check on
+    /// the writer: a cell's text must never change how a row splits (a
+    /// trailing backslash before a Markdown `|`, for one).
+    pub fn reads_back(&self, rendered: &[String]) -> bool {
+        let refs: Vec<&str> = rendered.iter().map(String::as_str).collect();
+        let found = find_tables(&refs, self.dialect);
+        if found.len() != 1
+            || found[0].start != 0
+            || found[0].end != refs.len()
+            || found[0].decline.is_some()
+        {
+            return false;
+        }
+        let again = parse_table(&refs, self.dialect);
+        if again.lines.len() != self.lines.len() {
+            return false;
+        }
+        let ncols = self.ncols();
+        let trim = |c: &str| c.trim_matches([' ', '\t']).to_string();
+        for (a, b) in self.lines.iter().zip(&again.lines) {
+            match (a, b) {
+                (Line::Hline, Line::Hline) => {}
+                (Line::Data(x), Line::Data(y)) => {
+                    if ncols > 0 && y.len() != ncols {
+                        return false;
+                    }
+                    for c in 0..ncols.max(x.len()).max(y.len()) {
+                        let xc = x.get(c).map_or(String::new(), |v| trim(v));
+                        let yc = y.get(c).map_or("", String::as_str);
+                        if xc != yc {
+                            return false;
+                        }
+                    }
+                }
+                _ => return false,
+            }
+        }
+        match (&self.md_delimiter, &again.md_delimiter) {
+            (None, None) => true,
+            (Some(m), Some(n)) => (0..ncols.max(m.len()).max(n.len())).all(|c| {
+                m.get(c).copied().unwrap_or(MdAlign::None)
+                    == n.get(c).copied().unwrap_or(MdAlign::None)
+            }),
+            _ => false,
+        }
+    }
+
     pub fn ncols(&self) -> usize {
         self.lines
             .iter()

@@ -202,6 +202,26 @@ fn process_found(
             formula: None,
             message: "the aligned table would exceed Tine's 128 KiB block limit".into(),
         })?;
+        // The aligned table must read back as the cells it was built from
+        // (malformed input: a cell whose text would change how its row
+        // splits, which would corrupt the table on write).
+        // Finding and parsing it again: a few regex passes per line, one
+        // pass over each character.
+        let size: u64 = rendered.iter().map(|l| l.len() as u64 + 1).sum();
+        if !work::ticks(rendered.len() as u64 * 10 * work::scan_ticks(0) + 8 * size) {
+            over_budget(&mut report);
+            out.extend(original());
+            continue;
+        }
+        if !t.reads_back(&rendered) {
+            report.skip(
+                f.tblfm.as_deref().unwrap_or("(alignment)"),
+                "the aligned table would not read back as the same cells",
+            );
+            report.declined_tables += 1;
+            out.extend(original());
+            continue;
+        }
         let cr = lines[f.start..f.end].iter().any(|l| l.ends_with('\r'));
         for l in rendered {
             out.push(if cr { format!("{l}\r") } else { l });
