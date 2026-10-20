@@ -1,0 +1,12 @@
+tests/fixtures/org-table-tests.json and tests/fixtures/org-table-tests-manual.json
+are derived from testing/lisp/test-org-table.el of GNU Org mode
+(https://git.savannah.gnu.org/git/emacs/org-mode.git, revision
+f38ac21c28f93da1fed1cb4bb46ec3006636f809).
+
+Copyright (C) Free Software Foundation, Inc.
+Licensed under the GNU General Public License, version 3 or (at your option)
+any later version: https://www.gnu.org/licenses/gpl-3.0.html
+
+These files are test data only. They are read by tests/org_fixtures.rs and are
+not compiled into, or shipped with, the plugin. The rest of this repository is
+MIT-licensed (see LICENSE).

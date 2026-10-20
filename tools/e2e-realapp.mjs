@@ -1,7 +1,7 @@
 // Real-app journey for the Table formulas plugin (tauri-driver + WebKitWebDriver).
 // Pattern copied from tine-og/scripts/e2e-plugin-graph-ownership.mjs; nothing in tine-og is edited.
 //
-//   TINE_APP=<tine binary> TINE_OG=/aux/koutecky/logseq/tine-og \
+//   TINE_APP=<tine binary> TINE_OG=<a Tine checkout> \
 //   [E2E_TMP_DIR=...] xvfb-run -a -s "-screen 0 1920x1080x24" node tools/e2e-realapp.mjs
 //
 // Run it under `bwrap --dev-bind / / --bind <scratch> $HOME` so a stray write can never reach real app data.
@@ -16,7 +16,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = path.resolve(HERE, "..");
-const OG = process.env.TINE_OG || "/aux/koutecky/logseq/tine-og";
+const OG = process.env.TINE_OG;
+if (!OG) throw new Error("set TINE_OG to a Tine checkout");
 const APP = process.env.TINE_APP;
 if (!APP) throw new Error("set TINE_APP to the tine binary");
 const req = createRequire(path.join(OG, "package.json"));
