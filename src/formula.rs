@@ -8,6 +8,7 @@
 use crate::calc::{self, FloatKind, Modes, Outcome};
 use crate::printf::{self, FormatError};
 use crate::table::{Line, Table};
+use crate::work;
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -55,7 +56,13 @@ pub fn parse_tblfm(s: &str) -> Result<Vec<Stored>, Abort> {
     static SEP: OnceLock<Regex> = OnceLock::new();
     let sep = re(&SEP, r" *:: *");
     let mut out: Vec<Stored> = Vec::new();
+    let mut lhs_seen: HashSet<String> = HashSet::new();
+    // Charged to the command's meter; the caller declines the table when it
+    // is spent. The split is a search (the regex engine's linear DFA, no
+    // captures), so it is charged as a plain pass of short-text regex cost.
+    let _ = work::ticks(work::scan_ticks(0) + 8 * s.len() as u64);
     for piece in sep.split(s) {
+        let _ = work::scan(piece.len());
         let Some(c) = entry.captures(piece) else {
             continue;
         };
@@ -77,7 +84,7 @@ pub fn parse_tblfm(s: &str) -> Result<Vec<Stored>, Abort> {
             }
         }
         let rhs = rhs.to_string();
-        if out.iter().any(|f| f.lhs == lhs) {
+        if !lhs_seen.insert(lhs.clone()) {
             return abort(
                 Some(&format!("{lhs}={rhs}")),
                 format!("double definition `{lhs}=` in the formula line"),
@@ -98,7 +105,8 @@ pub struct Skipped {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     /// Formulas the plugin could not evaluate exactly. A table with one is
-    /// left entirely as it was.
+    /// left entirely as it was. At most [`MAX_REPORTED`] distinct entries
+    /// are kept (the notice shows only the first few).
     pub skipped: Vec<Skipped>,
     /// Formulas whose result was `#ERROR`.
     pub errors: Vec<String>,
@@ -106,16 +114,23 @@ pub struct Report {
     pub declined_tables: usize,
     /// A Markdown table followed by an Org `#+TBLFM:` line (not read).
     pub org_line_in_markdown: bool,
-    /// Work units the command used ([`MAX_WORK`]); for tests and calibration.
+    /// Work units the command used (of [`MAX_WORK`]); for tests and
+    /// calibration.
     pub work_used: usize,
 }
 
+/// Entries kept in [`Report::skipped`] and [`Report::errors`]; a block with
+/// thousands of declined tables would otherwise compare each new entry with
+/// every earlier one (registry audit, 2026-10-20).
+pub const MAX_REPORTED: usize = 32;
+
 impl Report {
     pub fn skip(&mut self, formula: &str, reason: &str) {
-        if !self
-            .skipped
-            .iter()
-            .any(|s| s.formula == formula && s.reason == reason)
+        if self.skipped.len() < MAX_REPORTED
+            && !self
+                .skipped
+                .iter()
+                .any(|s| s.formula == formula && s.reason == reason)
         {
             self.skipped.push(Skipped {
                 formula: formula.to_string(),
@@ -124,7 +139,7 @@ impl Report {
         }
     }
     fn error(&mut self, formula: &str) {
-        if !self.errors.iter().any(|e| e == formula) {
+        if self.errors.len() < MAX_REPORTED && !self.errors.iter().any(|e| e == formula) {
             self.errors.push(formula.to_string());
         }
     }
@@ -150,36 +165,6 @@ struct Engine<'a> {
     types: Vec<bool>, // true = hline
     dlines: Vec<usize>,
     ncol: usize,
-    /// The command's work budget, shared by every table and pass.
-    budget: &'a Budget,
-}
-
-/// One command invocation's work budget ([`MAX_WORK`] units), shared by
-/// every table of the block and every recalculation pass.
-#[derive(Debug, Default)]
-pub struct Budget {
-    used: std::cell::Cell<usize>,
-}
-
-impl Budget {
-    pub fn new() -> Self {
-        Budget::default()
-    }
-
-    /// Add `units` of work; `false` once over [`MAX_WORK`].
-    pub fn charge(&self, units: usize) -> bool {
-        let total = self.used.get().saturating_add(units);
-        self.used.set(total);
-        total <= MAX_WORK
-    }
-
-    pub fn used(&self) -> usize {
-        self.used.get()
-    }
-
-    pub fn remaining(&self) -> usize {
-        MAX_WORK.saturating_sub(self.used.get())
-    }
 }
 
 const MAX_SUBSTITUTIONS: usize = 2000;
@@ -191,32 +176,29 @@ const MAX_SUBSTITUTIONS: usize = 2000;
 /// Fields one range reference may cover (the left-hand-side expansion has
 /// the same cap).
 pub const MAX_RANGE_FIELDS: usize = 100_000;
-/// Work one command invocation may do, over every table of the block and
-/// every pass. A unit is about 2.5 us in the release guest under Node
-/// (2026-10-20), so the cap is near 125 ms, half the host's 250 ms
-/// invocation timeout; every cost below is charged at about twice its
-/// measured time. One unit per field read through a reference (and per 8
-/// fields of the row copied for each evaluation), [`EVAL_WORK`] per
-/// evaluated field, [`scan_units`] each time a formula's text is scanned or
-/// rewritten, and the Calc work of evaluation ([`calc::TICKS_PER_UNIT`]).
-pub const MAX_WORK: usize = 50_000;
+/// The work one command run may do, over every table of the block and every
+/// pass ([`crate::work`]): about 125 ms in the release guest, half the
+/// host's 250 ms invocation timeout. Charged here: [`EVAL_WORK`] per
+/// evaluated field, one unit per field read through a reference, a pass
+/// ([`work::scan`]) each time a formula's text is searched or rewritten, the
+/// bytes of every field copied, and every loop over lines or targets. Calc
+/// and the Lisp number functions charge their own arithmetic.
+pub use crate::work::MAX_WORK;
+/// Fixed work for one evaluated field (allocations, the regex calls on
+/// short text), in units.
 pub const EVAL_WORK: usize = 2;
 /// Whole-text passes over a formula before its references are substituted
-/// (flags, `$<`/`$>`, syntax checks, each kind of reference), charged up front.
-const PRE_SCANS: usize = 4;
-
-/// Work units for one scan or rewrite of `len` bytes of formula text: about
-/// 17 ns per byte on short text and 200 ns per byte past 2 KiB, where the
-/// regex engine needs its slower general matcher (measured on the release
-/// guest, 2026-10-20), charged at twice that.
-pub fn scan_units(len: usize) -> usize {
-    len / 64 + len.saturating_sub(2048) / 8 + 1
-}
+/// (`;`, the named-reference, old-syntax and remote checks, the copy and the
+/// two `@#`/`$#` rewrites, the date check), charged up front; the loops that
+/// substitute references and remove mode letters charge each round.
+const PRE_SCANS: u64 = 8;
+/// Work for one field read through a reference, in units.
+const FIELD_UNITS: usize = 1;
 /// Length of one formula after its references are substituted.
 pub const MAX_EXPANDED_FORMULA: usize = 256 * 1024;
 
 impl<'a> Engine<'a> {
-    fn new(table: &'a mut Table, budget: &'a Budget) -> Result<Self, Abort> {
+    fn new(table: &'a mut Table) -> Result<Self, Abort> {
         let mut types: Vec<bool> = table
             .lines
             .iter()
@@ -242,7 +224,6 @@ impl<'a> Engine<'a> {
             types,
             dlines,
             ncol,
-            budget,
         })
     }
 
@@ -267,12 +248,10 @@ impl<'a> Engine<'a> {
         matches!(self.table.lines.get(line), Some(Line::Data(_)))
     }
 
-    /// The 1-based data line number of a table line (Org's `@#`).
+    /// The 1-based data line number of a table line (Org's `@#`); `dlines`
+    /// is sorted, so this is a binary search, not a scan per field.
     fn dline_number(&self, line: usize) -> usize {
-        self.dlines
-            .iter()
-            .position(|&l| l == line)
-            .map_or(0, |p| p + 1)
+        self.dlines.binary_search(&line).map_or(0, |p| p + 1)
     }
 
     fn row_type(
@@ -295,14 +274,19 @@ impl<'a> Engine<'a> {
             );
         }
         let mut i = start;
+        let mut steps: u64 = 0;
         for _ in 0..n {
             loop {
+                steps += 1;
                 i += if backwards { -1 } else { 1 };
                 if i < 0 || i >= l || self.types[i as usize] == want_hline {
                     break;
                 }
             }
         }
+        // At most one pass over the table's lines; the evaluation checks the
+        // meter after the reference is read.
+        let _ = work::ticks(16 + steps * 2);
         if i < 0 || i >= l {
             return abort(
                 Some(f),
@@ -383,6 +367,7 @@ impl<'a> Engine<'a> {
         if !rangep || (r1 == r2 && c1 == c2) {
             let mut l = r1;
             while !self.is_dline(l) {
+                let _ = work::ticks(2);
                 l += 1;
                 if l >= self.table.lines.len() {
                     return abort(Some(f), format!("reference {desc} leads outside the table"));
@@ -399,12 +384,14 @@ impl<'a> Engine<'a> {
             return abort(Some(f), format!("reference {desc} points to column {fc}"));
         }
         while !self.is_dline(first) {
+            let _ = work::ticks(2);
             first += 1;
             if first >= self.table.lines.len() {
                 return abort(Some(f), format!("range {desc} leads outside the table"));
             }
         }
         while !self.is_dline(last) {
+            let _ = work::ticks(2);
             if last == 0 {
                 return abort(Some(f), format!("range {desc} leads outside the table"));
             }
@@ -419,6 +406,9 @@ impl<'a> Engine<'a> {
             )));
         }
         let (lo, hi) = (first, last);
+        if !work::ticks(16 + 2 * (hi - lo + 1) as u64) {
+            return Ok(RangeVal::Decline(WORK_REASON.into()));
+        }
         let rows = (lo..=hi).filter(|&l| self.is_dline(l)).count();
         let area = rows.saturating_mul((lc - fc + 1) as usize);
         if area > MAX_RANGE_FIELDS {
@@ -426,7 +416,7 @@ impl<'a> Engine<'a> {
                 "the range {desc} covers more than {MAX_RANGE_FIELDS} fields"
             )));
         }
-        if !self.charge(area) {
+        if !work::units(area.saturating_mul(FIELD_UNITS)) {
             return Ok(RangeVal::Decline(WORK_REASON.into()));
         }
         let mut out = Vec::with_capacity(area);
@@ -435,7 +425,11 @@ impl<'a> Engine<'a> {
                 continue;
             }
             for c in fc..=lc {
-                out.push(self.field(l, c));
+                let x = self.field(l, c);
+                if !work::text(x.len()) {
+                    return Ok(RangeVal::Decline(WORK_REASON.into()));
+                }
+                out.push(x);
             }
         }
         Ok(RangeVal::Many(out))
@@ -459,6 +453,7 @@ impl<'a> Engine<'a> {
         let Some(c) = c else {
             return abort(Some(f), format!("invalid table range specifier `{desc}`"));
         };
+        let _ = work::scan(desc_owned.len());
         let rangep = c.get(3).is_some();
         let line_of = |g: Option<regex::Match>| -> Result<usize, Abort> {
             match g.map(|m| m.as_str()).filter(|s| !s.trim().is_empty()) {
@@ -477,36 +472,27 @@ impl<'a> Engine<'a> {
         Ok((r1, c1, r2, c2, rangep))
     }
 
+    /// Binary searches over the sorted `dlines`.
     fn line_to_dline(&self, line: usize, above: bool) -> Option<usize> {
         let first = *self.dlines.first()?;
         let last = *self.dlines.last()?;
         if line < first || line > last {
             return None;
         }
-        if let Some(p) = self.dlines.iter().position(|&l| l == line) {
+        if let Ok(p) = self.dlines.binary_search(&line) {
             return Some(p + 1);
         }
+        // The number of data lines before `line`.
+        let before = self.dlines.partition_point(|&l| l < line);
         if above {
-            self.dlines.iter().rposition(|&l| l < line).map(|p| p + 1)
+            before.checked_sub(1).map(|p| p + 1)
         } else {
-            self.dlines.iter().position(|&l| l > line).map(|p| p + 1)
+            (before < self.dlines.len()).then_some(before + 1)
         }
     }
 }
 
-const WORK_REASON: &str = "the formulas need more computation than the plugin allows in one run (budget: 50000 units for the whole block)";
-
-impl Engine<'_> {
-    /// Add `units` of work; `false` once over [`MAX_WORK`].
-    fn charge(&self, units: usize) -> bool {
-        self.budget.charge(units)
-    }
-
-    /// Charge one scan or rewrite of `text`.
-    fn charge_scan(&self, text: &str) -> bool {
-        self.charge(scan_units(text.len()))
-    }
-}
+pub const WORK_REASON: &str = "the formulas need more computation than the plugin allows in one run (budget: 50000 units for the whole block)";
 
 fn range_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -517,14 +503,21 @@ fn range_re() -> &'static Regex {
 }
 
 /// `@<`, `@>`, `$<`, `$>` (and `@<<`, `$>>`...) to row and column numbers,
-/// outside `remote(...)`.
-fn handle_first_last(s: &str, nrows: usize, ncol: usize, f: &str) -> Result<String, Abort> {
+/// outside `remote(...)`. `Ok(None)`: the command's work budget ran out
+/// (each round searches and rewrites the text, and is charged as a pass).
+fn handle_first_last(s: &str, nrows: usize, ncol: usize, f: &str) -> Result<Option<String>, Abort> {
     static R: OnceLock<Regex> = OnceLock::new();
     let r = re(&R, r"([@$])(<+|>+)|(remote\([^)]+\))");
     let mut out = s.to_string();
     let mut start = 0;
     let mut guard = 0;
-    while let Some(c) = r.captures_at(&out, start) {
+    loop {
+        if !work::scan(out.len()) {
+            return Ok(None);
+        }
+        let Some(c) = r.captures_at(&out, start) else {
+            break;
+        };
         guard += 1;
         if guard > MAX_SUBSTITUTIONS {
             return abort(Some(f), "too many references");
@@ -555,20 +548,34 @@ fn handle_first_last(s: &str, nrows: usize, ncol: usize, f: &str) -> Result<Stri
         out.replace_range(whole.clone(), &rep);
         start = whole.start;
     }
-    Ok(out)
+    Ok(Some(out))
+}
+
+/// `Err` with the work reason once the command's budget is spent.
+fn within_budget(charged: bool) -> Result<(), String> {
+    if charged && !work::exhausted() {
+        Ok(())
+    } else {
+        Err(WORK_REASON.to_string())
+    }
 }
 
 /// `string-to-number` then `number-to-string`, as the `N` flag converts a
-/// field. `Err` is a skip reason (a value the plugin cannot convert exactly).
+/// field. `Err` is a skip reason (a value the plugin cannot convert exactly,
+/// or the work budget is spent; both functions charge their work).
 fn lisp_number_text(x: &str) -> Result<String, String> {
-    match printf::string_to_number(x) {
-        Some(n) => Ok(printf::number_to_string(&n)),
-        None => Err(format!(
+    let n = printf::string_to_number(x);
+    within_budget(true)?;
+    let Some(n) = n else {
+        return Err(format!(
             "the N flag on `{}` (an infinity/NaN spelling or an integer over {} digits)",
             x.chars().take(40).collect::<String>(),
             printf::MAX_INT_DIGITS
-        )),
-    }
+        ));
+    };
+    let t = printf::number_to_string(&n);
+    within_budget(true)?;
+    Ok(t)
 }
 
 fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> Result<String, String> {
@@ -583,6 +590,7 @@ fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> Result<Strin
     Ok(match v {
         RangeVal::Decline(why) => return Err(why.clone()),
         RangeVal::One(x) => {
+            within_budget(work::text(x.len()))?;
             if nonblank(x) {
                 format!("({})", conv(x)?)
             } else if !keep_empty || numbers {
@@ -593,15 +601,23 @@ fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> Result<Strin
         }
         RangeVal::Many(items) => {
             let mut parts: Vec<String> = Vec::with_capacity(items.len());
-            for x in items.iter().filter(|x| keep_empty || nonblank(x)) {
-                parts.push(if nonblank(x) {
+            let mut total = 0;
+            for x in items.iter() {
+                within_budget(work::text(x.len()))?;
+                if !(keep_empty || nonblank(x)) {
+                    continue;
+                }
+                let part = if nonblank(x) {
                     conv(x)?
                 } else if !keep_empty || numbers {
                     "0".to_string()
                 } else {
                     "nan".to_string()
-                });
+                };
+                total += part.len() + 1;
+                parts.push(part);
             }
+            within_budget(work::text(total))?;
             format!("[{}]", parts.join(","))
         }
     })
@@ -616,7 +632,9 @@ struct Prepared {
 }
 
 /// Split off `;flags` and read the mode letters, as Org does before anything
-/// else. `Err` carries a skip reason.
+/// else. `Err` carries a skip reason. Org removes one mode letter (or flag)
+/// per round, searching again from the start: each round is charged as two
+/// passes over the remaining text (registry audit, 2026-10-20).
 fn prepare(rhs: &str) -> Result<Prepared, String> {
     let mut modes = Modes::default();
     let (mut numbers, mut keep_empty) = (false, false);
@@ -624,12 +642,17 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
         Some(p) => (rhs[..p].to_string(), Some(rhs[p + 1..].to_string())),
         None => (rhs.to_string(), None),
     };
+    let round = |fmt: &str| within_budget(work::ticks(2 * work::scan_ticks(fmt.len())));
     let fmt = match fmt {
         None => None,
         Some(mut fmt) => {
             static NUM: OnceLock<Regex> = OnceLock::new();
             let num = re(&NUM, r"([pnfse])(-?[0-9]+)");
-            while let Some(c) = num.captures(&fmt) {
+            loop {
+                round(&fmt)?;
+                let Some(c) = num.captures(&fmt) else {
+                    break;
+                };
                 let letter = c.get(1).map_or("", |m| m.as_str());
                 let Some(n) = printf::small_int(c.get(2).map_or("0", |m| m.as_str())) else {
                     return Err(format!(
@@ -681,7 +704,11 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
             }
             static FLAG: OnceLock<Regex> = OnceLock::new();
             let flag = re(&FLAG, r"[tTUNLEDRFSu]");
-            while let Some(m) = flag.find(&fmt) {
+            loop {
+                round(&fmt)?;
+                let Some(m) = flag.find(&fmt) else {
+                    break;
+                };
                 match m.as_str() {
                     "t" | "T" | "U" => {
                         return Err("durations (flags t, T, U) are not supported".into())
@@ -714,12 +741,14 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
 
 impl<'a> Engine<'a> {
     /// `org-table-eval-formula` for the field at `line`, column `n0`.
+    ///
+    /// Every pass and loop below charges the command's work meter; the
+    /// evaluation is declined (`Skip` with the work reason) as soon as it is
+    /// spent, and never returns a value computed after that.
     fn eval(&self, rhs: &str, line: usize, n0: usize, f: &str) -> Result<EvalResult, Abort> {
-        if !self.charge(EVAL_WORK) {
-            return Ok(EvalResult::Skip(WORK_REASON.into()));
-        }
-        if !self.charge(scan_units(rhs.len()).saturating_mul(PRE_SCANS)) {
-            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        let over = || Ok(EvalResult::Skip(WORK_REASON.into()));
+        if !work::units(EVAL_WORK) || !work::ticks(PRE_SCANS * work::scan_ticks(rhs.len())) {
+            return over();
         }
         let p = match prepare(rhs) {
             Ok(p) => p,
@@ -731,13 +760,22 @@ impl<'a> Engine<'a> {
                 "named columns, parameters and constants are not supported".into(),
             ));
         }
-        let formula = handle_first_last(&p.expr, self.dlines.len(), self.ncol, f)?;
-        let mut fields: Vec<String> = self.fields(line).to_vec();
-        if !self.charge(fields.len() / 8) {
-            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        let Some(formula) = handle_first_last(&p.expr, self.dlines.len(), self.ncol, f)? else {
+            return over();
+        };
+        let row = self.fields(line);
+        // The row is copied for each field evaluated.
+        if !work::ticks(16 * (row.len() as u64 + 1))
+            || !work::text(row.iter().map(String::len).sum())
+        {
+            return over();
         }
+        let mut fields: Vec<String> = row.to_vec();
         if p.numbers {
             for x in fields.iter_mut() {
+                if !work::text(x.len()) {
+                    return over();
+                }
                 if x.chars().any(|c| !c.is_whitespace()) {
                     match lisp_number_text(x) {
                         Ok(t) => *x = t,
@@ -770,8 +808,12 @@ impl<'a> Engine<'a> {
             ));
         }
         // Complex ranges: the first `@...` match, while it is longer than `@`.
+        // Each round searches and rewrites the whole formula.
         let mut guard = 0;
         loop {
+            if !work::scan(form.len()) {
+                return over();
+            }
             let Some(m) = range_re().find(&form) else {
                 break;
             };
@@ -782,10 +824,10 @@ impl<'a> Engine<'a> {
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
             }
-            if !self.charge_scan(&form) {
-                return Ok(EvalResult::Skip(WORK_REASON.into()));
-            }
             let v = self.get_range(m.as_str(), line, n0 as i64, f)?;
+            if work::exhausted() {
+                return over();
+            }
             let rpl = match make_reference(&v, p.keep_empty, p.numbers) {
                 Ok(r) => r,
                 Err(why) => return Ok(EvalResult::Skip(why)),
@@ -794,6 +836,9 @@ impl<'a> Engine<'a> {
                 return Ok(EvalResult::Skip(format!(
                     "the formula grows past {MAX_EXPANDED_FORMULA} bytes"
                 )));
+            }
+            if !work::text(rpl.len() + form.len()) {
+                return over();
             }
             if rpl.contains(&form) {
                 return abort(Some(f), format!("invalid reference \"{form}\""));
@@ -805,7 +850,13 @@ impl<'a> Engine<'a> {
         static SIMPLE: OnceLock<Regex> = OnceLock::new();
         let simple = re(&SIMPLE, r"\$(([-+])?[0-9]+)\.\.\$(([-+])?[0-9]+)");
         guard = 0;
-        while let Some(c) = simple.captures(&form) {
+        loop {
+            if !work::scan(form.len()) {
+                return over();
+            }
+            let Some(c) = simple.captures(&form) else {
+                break;
+            };
             guard += 1;
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
@@ -827,11 +878,14 @@ impl<'a> Engine<'a> {
                     ),
                 );
             }
-            if !self.charge((b - a) as usize) || !self.charge_scan(&form) {
-                return Ok(EvalResult::Skip(WORK_REASON.into()));
+            let slice = &fields[a as usize..b as usize];
+            if !work::units(slice.len() * FIELD_UNITS)
+                || !work::text(slice.iter().map(String::len).sum())
+            {
+                return over();
             }
-            let slice = fields[a as usize..b as usize].to_vec();
-            let rpl = match make_reference(&RangeVal::Many(slice), p.keep_empty, p.numbers) {
+            let rpl = match make_reference(&RangeVal::Many(slice.to_vec()), p.keep_empty, p.numbers)
+            {
                 Ok(r) => r,
                 Err(why) => return Ok(EvalResult::Skip(why)),
             };
@@ -847,13 +901,19 @@ impl<'a> Engine<'a> {
         static SINGLE: OnceLock<Regex> = OnceLock::new();
         let single = re(&SINGLE, r"\$(([-+])?[0-9]+)");
         guard = 0;
-        while let Some(c) = single.captures(&form) {
+        loop {
+            if !work::scan(form.len()) {
+                return over();
+            }
+            let Some(c) = single.captures(&form) else {
+                break;
+            };
             guard += 1;
             if guard > MAX_SUBSTITUTIONS {
                 return abort(Some(f), "too many references");
             }
-            if !self.charge(1) || !self.charge_scan(&form) {
-                return Ok(EvalResult::Skip(WORK_REASON.into()));
+            if !work::units(FIELD_UNITS) {
+                return over();
             }
             let raw = c.get(1).map_or("0", |m| m.as_str());
             let Some(mut n) = printf::small_int(raw) else {
@@ -878,24 +938,27 @@ impl<'a> Engine<'a> {
                     "the formula grows past {MAX_EXPANDED_FORMULA} bytes"
                 )));
             }
+            if !work::text(rpl.len() + formula.len()) {
+                return over();
+            }
             if rpl.contains(&formula) {
                 return abort(Some(f), format!("invalid field specifier \"{whole}\""));
             }
             let r = c.get(0).map_or(0..0, |m| m.range());
             form.replace_range(r, &rpl);
         }
+        if !work::scan(form.len()) {
+            return over();
+        }
         static TS: OnceLock<Regex> = OnceLock::new();
         if re(&TS, r"[<\[][0-9]{4}-[0-9]{2}-[0-9]{2}").is_match(&form) {
             return Ok(EvalResult::Skip("dates and times are not supported".into()));
         }
         let num_only = p.numbers && !p.keep_empty;
-        if !self.charge_scan(&form) {
-            return Ok(EvalResult::Skip(WORK_REASON.into()));
-        }
-        let (ev, used) =
-            calc::calc_eval_budget(&form, p.modes, num_only, self.budget.remaining() as u64);
-        if !self.charge(used as usize) {
-            return Ok(EvalResult::Skip(WORK_REASON.into()));
+        // Calc charges its own reading and arithmetic.
+        let ev = calc::calc_eval(&form, p.modes, num_only);
+        if work::exhausted() {
+            return over();
         }
         let ev = match ev {
             Ok(v) => v,
@@ -917,11 +980,17 @@ impl<'a> Engine<'a> {
                     );
                 }
                 Err(FormatError::Unsupported(why)) => {
-                    return Ok(EvalResult::Skip(format!("format {why}")))
+                    if work::exhausted() {
+                        return over();
+                    }
+                    return Ok(EvalResult::Skip(format!("format {why}")));
                 }
             },
             None => ev,
         };
+        if !work::text(out.len() * 3) {
+            return over();
+        }
         let out = out.replace('\n', "");
         if out.len() > crate::MAX_RAW_UTF16 {
             return Ok(EvalResult::Skip(
@@ -931,9 +1000,15 @@ impl<'a> Engine<'a> {
         if out.contains('|') {
             return Ok(EvalResult::Skip("the result contains `|`".into()));
         }
+        // No value computed past the budget is written.
+        if work::exhausted() {
+            return over();
+        }
         Ok(EvalResult::Value(out))
     }
 
+    /// Store `value`, extending the row with empty fields up to `col` (Org's
+    /// `org-table-goto-column` with `force`); the caller charged the growth.
     fn set_field(&mut self, line: usize, col: usize, value: String) {
         if let Some(Line::Data(f)) = self.table.lines.get_mut(line) {
             if f.len() < col {
@@ -975,6 +1050,10 @@ impl<'a> Engine<'a> {
     }
 }
 
+/// Fields a table may have once column formulas extend its rows (Org adds
+/// empty fields up to the formula's column); about 2 MB of empty fields.
+pub const MAX_TABLE_FIELDS: usize = 100_000;
+
 /// One `org-table-recalculate` pass over the whole table (what `C-c C-c` on
 /// the formula line does). The table is changed in place.
 ///
@@ -983,22 +1062,57 @@ impl<'a> Engine<'a> {
 /// formula leaves a cell Org would have changed, so any later formula could
 /// compute from the wrong value (review finding F1).
 pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abort> {
-    recalculate_in(table, formulas, &Budget::new())
+    let _run = work::Run::start();
+    recalculate_in(table, formulas)
 }
 
-/// [`recalculate`] charging `budget`, which the caller shares across every
-/// table and pass of one command invocation.
-pub fn recalculate_in(
-    table: &mut Table,
-    formulas: &[Stored],
-    budget: &Budget,
-) -> Result<Report, Abort> {
+/// [`recalculate`] within the command's active work run ([`work::Run`]),
+/// which the caller shares across every table and pass.
+pub fn recalculate_in(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abort> {
     let mut report = Report::default();
-    let mut eng = Engine::new(table, budget)?;
+    let declined = |mut report: Report, text: &str, why: &str| {
+        report.skip(text, why);
+        Ok(report)
+    };
+    let first_text = formulas.first().map(Stored::text).unwrap_or_default();
+    // The passes over the table below (data lines, marks, row widths, the
+    // rows column formulas run on) are charged up front, by lines and bytes.
+    let bytes: usize = table
+        .lines
+        .iter()
+        .map(|l| match l {
+            Line::Data(f) => f.iter().map(|x| x.len() + 8).sum(),
+            Line::Hline => 8,
+        })
+        .sum();
+    if !work::ticks(64 * table.lines.len() as u64) || !work::text(bytes.saturating_mul(4)) {
+        return declined(report, &first_text, WORK_REASON);
+    }
+    let markdown = table.md_delimiter.is_some();
+    let mut eng = Engine::new(table)?;
     let nrows = eng.dlines.len();
     let ncol = eng.ncol;
+    // Markdown: the header (the line above the delimiter row) fixes the
+    // columns; Org would extend the table past them (it adds empty fields
+    // up to a column formula's column), which in Markdown changes the header
+    // and the delimiter row, so such a write is declined (registry audit,
+    // 2026-10-20).
+    let header_width = markdown.then(|| eng.fields(0).len());
+    let past_header = |c: usize| header_width.is_some_and(|w| c > w);
+    let header_reason = |lhs: &str, c: usize| {
+        format!(
+            "`{lhs}` writes to column {c}, past the {} columns of the Markdown table's header",
+            header_width.unwrap_or(0)
+        )
+    };
     let mut eqlist: Vec<Stored> = formulas.to_vec();
+    let text_len: usize = eqlist.iter().map(|e| e.lhs.len() + e.rhs.len() + 2).sum();
+    let log = (usize::BITS - eqlist.len().leading_zeros()) as u64 + 1;
+    if !work::ticks(64 * log * eqlist.len() as u64) || !work::text(text_len.saturating_mul(2)) {
+        return declined(report, &first_text, WORK_REASON);
+    }
     eqlist.sort_by(|a, b| a.lhs.as_bytes().cmp(b.lhs.as_bytes()));
+    let lhs_set: HashSet<&str> = eqlist.iter().map(|e| e.lhs.as_str()).collect();
 
     // Field formulas keep the (expanded) target and their original text.
     let mut cols: Vec<(usize, String, String)> = Vec::new();
@@ -1008,16 +1122,19 @@ pub fn recalculate_in(
     for e in &eqlist {
         let text = e.text();
         let f = Some(text.as_str());
-        if !budget.charge(scan_units(e.rhs.len() + e.lhs.len()).saturating_mul(3)) {
-            report.skip(&text, WORK_REASON);
-            return Ok(report);
+        if !work::ticks(3 * work::scan_ticks(e.rhs.len() + e.lhs.len())) {
+            return declined(report, &text, WORK_REASON);
         }
-        let rhs = handle_first_last(&e.rhs, nrows, ncol, &text)?;
+        let Some(rhs) = handle_first_last(&e.rhs, nrows, ncol, &text)? else {
+            return declined(report, &text, WORK_REASON);
+        };
         let lhs = if re(&HLINE_LHS, r"^@-?I+").is_match(&e.lhs) {
             return abort(f, "can't assign to an hline-relative reference");
         } else if e.lhs.starts_with("$<") || e.lhs.starts_with("$>") {
-            let new = handle_first_last(&e.lhs, nrows, ncol, &text)?;
-            if eqlist.iter().any(|o| o.lhs == new) {
+            let Some(new) = handle_first_last(&e.lhs, nrows, ncol, &text)? else {
+                return declined(report, &text, WORK_REASON);
+            };
+            if lhs_set.contains(new.as_str()) {
                 return abort(
                     f,
                     format!(
@@ -1030,7 +1147,9 @@ pub fn recalculate_in(
         } else {
             e.lhs.clone()
         };
-        let lhs = handle_first_last(&lhs, nrows, ncol, &text)?;
+        let Some(lhs) = handle_first_last(&lhs, nrows, ncol, &text)? else {
+            return declined(report, &text, WORK_REASON);
+        };
         if let Some(n) = re(&COL_LHS, r"^\$([0-9]+)$")
             .captures(&lhs)
             .and_then(|c| c.get(1))
@@ -1038,6 +1157,9 @@ pub fn recalculate_in(
             let n: usize = n.as_str().parse().unwrap_or(0);
             if n == 0 || n > 1000 {
                 return abort(f, "formula column target too large");
+            }
+            if past_header(n) {
+                return declined(report, &text, &header_reason(&lhs, n));
             }
             cols.push((n, rhs, text));
         } else if !lhs.starts_with('@') && !lhs.starts_with('$') {
@@ -1052,7 +1174,7 @@ pub fn recalculate_in(
     // their formula by index into `field_eqs`: the right-hand side is shared,
     // not copied per target.
     let mut expanded: Vec<(usize, usize, usize)> = Vec::new(); // (dline, col, formula)
-    let mut planned: usize = 0;
+    let mut planned: u64 = 0;
     let thisline = eng.table.lines.len().saturating_sub(1);
     static ONE_FIELD: OnceLock<Regex> = OnceLock::new();
     static ROW: OnceLock<Regex> = OnceLock::new();
@@ -1065,6 +1187,9 @@ pub fn recalculate_in(
         if re(&ONE_FIELD, r"^@[-+0-9]+\$-?[0-9]+$").is_match(lhs) {
             targets.push(lhs.clone());
         } else if re(&ROW, r"^@[0-9]+$").is_match(lhs) {
+            if !work::ticks(64 * ncol as u64) {
+                return declined(report, text, WORK_REASON);
+            }
             for c in 1..=ncol {
                 targets.push(format!("{lhs}${c}"));
             }
@@ -1098,6 +1223,12 @@ pub fn recalculate_in(
                 );
                 return Ok(report);
             }
+            if past_header(lc as usize) {
+                return declined(report, text, &header_reason(lhs, lc as usize));
+            }
+            if !work::ticks(8 * ((r2 + 1 - r1) * (lc - fc + 1) as usize) as u64) {
+                return declined(report, text, WORK_REASON);
+            }
             for r in r1..=r2 {
                 for c in fc..=lc {
                     cells.push((r, c as usize));
@@ -1121,6 +1252,9 @@ pub fn recalculate_in(
             if r == 0 || r > nrows {
                 return abort(f, format!("invalid row number in {t}"));
             }
+            if past_header(col) {
+                return declined(report, text, &header_reason(lhs, col));
+            }
             cells.push((r, col));
         }
         if expanded.len() + cells.len() > MAX_RANGE_FIELDS {
@@ -1131,14 +1265,12 @@ pub fn recalculate_in(
             return Ok(report);
         }
         // Every target evaluates the whole right-hand side, at least
-        // EVAL_WORK plus one scan of it: refuse up front, before any target
-        // runs, when the block's remaining budget cannot cover them all.
-        planned = planned.saturating_add(
-            cells
-                .len()
-                .saturating_mul(EVAL_WORK + scan_units(rhs.len()) * PRE_SCANS),
-        );
-        if planned > budget.remaining() {
+        // EVAL_WORK plus its passes over it: refuse up front, before any
+        // target runs, when the block's remaining budget cannot cover them.
+        let per_target =
+            EVAL_WORK as u64 * work::TICKS_PER_UNIT + PRE_SCANS * work::scan_ticks(rhs.len());
+        planned = planned.saturating_add((cells.len() as u64).saturating_mul(per_target));
+        if planned > work::remaining_units() as u64 * work::TICKS_PER_UNIT {
             report.skip(
                 text,
                 &format!(
@@ -1150,6 +1282,10 @@ pub fn recalculate_in(
             return Ok(report);
         }
         expanded.extend(cells.into_iter().map(|(r, c)| (r, c, eq)));
+    }
+    // Two hash sets over the targets.
+    if !work::ticks(128 * expanded.len() as u64) {
+        return declined(report, &first_text, WORK_REASON);
     }
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
     for (r, c, eq) in &expanded {
@@ -1192,14 +1328,36 @@ pub fn recalculate_in(
         let begin = begin.unwrap_or(0);
         eng.dlines.iter().copied().filter(|&l| l >= begin).collect()
     };
-    if !cols.is_empty() {
+    if let Some(cmax) = cols.iter().map(|(c, _, _)| *c).max() {
+        // Column formulas extend the rows they run on up to their column:
+        // bound the fields that adds before any row is touched.
+        let fields = eng
+            .dlines
+            .iter()
+            .map(|&l| eng.fields(l).len())
+            .chain(
+                rows.iter()
+                    .map(|&l| cmax.saturating_sub(eng.fields(l).len())),
+            )
+            .fold(0usize, usize::saturating_add);
+        if fields > MAX_TABLE_FIELDS {
+            return declined(
+                report,
+                &cols[0].2,
+                &format!("the table would grow past {MAX_TABLE_FIELDS} fields"),
+            );
+        }
         for &l in &rows {
             let ff = first_field(&eng, l);
             if matches!(ff.trim(), "_" | "^" | "!" | "$" | "/") {
                 continue;
             }
             for (c, rhs, text) in &cols {
-                if eng.fields(l).len() < *c {
+                let have = eng.fields(l).len();
+                if have < *c {
+                    if !work::ticks(16 + 8 * (*c - have) as u64) {
+                        return declined(report, text, WORK_REASON);
+                    }
                     eng.set_field(l, *c, String::new());
                 }
                 if untouchable.contains(&(l, *c)) {

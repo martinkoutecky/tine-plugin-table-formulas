@@ -5,8 +5,13 @@
 //! functions (and checked against the C library conventions they follow);
 //! no Emacs code is copied.
 
+use crate::work;
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
+
+// The functions here charge the command's work meter ([`crate::work`])
+// without failing: the charges are sticky, and the formula engine declines
+// the field at its next check once the budget is spent.
 
 /// Integers with more decimal digits than this are not converted: the plugin
 /// declines instead (malformed-input budget; Emacs itself has bignums).
@@ -33,6 +38,7 @@ impl LispNum {
 /// exactly; callers must decline, never treat it as 0 (review round 2, B3).
 pub fn small_int(s: &str) -> Option<i64> {
     const CAP: i64 = 1_000_000;
+    let _ = work::text(s.len());
     let t = s.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
     let (neg, digits) = match t.as_bytes().first() {
         Some(b'-') => (true, &t[1..]),
@@ -65,6 +71,7 @@ pub fn small_int(s: &str) -> Option<i64> {
 /// value exactly (Emacs's `1.0e+INF`/`0.0e+NaN` syntax, or an integer above
 /// [`MAX_INT_DIGITS`]); callers decline.
 pub fn string_to_number(s: &str) -> Option<LispNum> {
+    let _ = work::text(s.len());
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
@@ -121,12 +128,14 @@ pub fn string_to_number(s: &str) -> Option<LispNum> {
     let text = &s[start..end];
     if is_float {
         // "3.e5" is not a Rust float literal; drop a dot with no fraction.
+        let _ = work::text(text.len().saturating_mul(4));
         let cleaned = text.replace(".e", "e").replace(".E", "E");
         Some(LispNum::Float(cleaned.parse::<f64>().unwrap_or(0.0)))
     } else {
         if int_digits > MAX_INT_DIGITS {
             return None;
         }
+        let _ = work::ticks(work::decimal_ticks(work::digit_limbs(int_digits)));
         let t = text.trim_end_matches('.');
         let t = t.strip_prefix('+').unwrap_or(t);
         t.parse::<BigInt>().ok().map(LispNum::Int)
@@ -199,8 +208,13 @@ fn force_point(s: &str) -> String {
 /// neither a dot nor an exponent.
 pub fn number_to_string(n: &LispNum) -> String {
     match n {
-        LispNum::Int(i) => i.to_string(),
+        LispNum::Int(i) => {
+            let _ = work::ticks(work::decimal_ticks(work::limbs(i)));
+            i.to_string()
+        }
         LispNum::Float(x) => {
+            // Up to three shortest-digits conversions and a read back.
+            let _ = work::ticks(FLOAT_TEXT_TICKS);
             let x = *x;
             if x.is_nan() {
                 return if x.is_sign_negative() {
@@ -259,7 +273,11 @@ const EXACT_FLOAT_INT: i64 = 1 << 53;
 ///   with a minus sign (Emacs's default, `binary-as-unsigned` nil);
 /// * `f e E g G`: flags `- + space 0 #`, width, precision;
 /// * `s`: flag `-` and width, no precision.
+/// Converting a double to or from text, up to 100 digits.
+const FLOAT_TEXT_TICKS: u64 = 4096;
+
 pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
+    let _ = work::text(fmt.len().saturating_mul(2));
     let chars: Vec<char> = fmt.chars().collect();
     let mut out = String::new();
     let mut used = false;
@@ -313,6 +331,7 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
         if width > 1000 || precision.is_some_and(|p| p > 100) {
             return unsupported("a huge width or precision");
         }
+        let _ = work::text(width + precision.unwrap_or(0));
         let Some(&conv) = chars.get(i) else {
             return unsupported("a format ending in `%`");
         };
@@ -347,6 +366,7 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
                     }
                 };
                 let a = v.abs();
+                let _ = work::ticks(work::decimal_ticks(work::limbs(&a)));
                 let mut b = if precision == Some(0) && a.is_zero() {
                     String::new()
                 } else {
@@ -392,6 +412,7 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
                 }
                 let p = precision.unwrap_or(6);
                 let a = as_f.abs();
+                let _ = work::ticks(FLOAT_TEXT_TICKS);
                 let mut b = match conv {
                     'f' => format!("{:.*}", p, a),
                     'e' => fmt_e(a, p, false),

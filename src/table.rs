@@ -249,10 +249,39 @@ fn formula_lines(
     }
 }
 
+/// A `<!-- ... -->` comment that ends on its own line.
+fn one_line_comment(l: &str) -> bool {
+    let (ind, rest) = indent_of(l);
+    ind <= 3 && rest.starts_with("<!--") && rest[4..].contains("-->")
+}
+
+/// For each line, whether an HTML line (one starting with `<`, other than a
+/// one-line comment) comes above it in the same paragraph with no one-line
+/// comment between: a table there may be HTML. One pass over the block; it
+/// replaced a scan back from every table, quadratic in a block of many
+/// tables without blank lines (registry audit, 2026-10-20).
+fn html_above(lines: &[&str]) -> Vec<bool> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut html = false;
+    for l in lines {
+        out.push(html);
+        if is_blank(l) || one_line_comment(l) {
+            html = false;
+        } else {
+            let (ind, rest) = indent_of(l);
+            if ind <= 3 && rest.starts_with('<') {
+                html = true;
+            }
+        }
+    }
+    out
+}
+
 /// Why a Markdown pipe block cannot be recalculated safely, if it cannot:
 /// it is not a GFM table, or its extent depends on Markdown structure the
-/// plugin does not parse (review finding F7).
-fn md_table_problem(lines: &[&str], start: usize, end: usize) -> Option<String> {
+/// plugin does not parse (review finding F7). `html_above` is
+/// [`html_above`] at the table's first line.
+fn md_table_problem(lines: &[&str], start: usize, end: usize, html_above: bool) -> Option<String> {
     let run = &lines[start..end];
     if run.iter().any(|l| indent_of(l).0 > 3) {
         return Some(
@@ -277,28 +306,16 @@ fn md_table_problem(lines: &[&str], start: usize, end: usize) -> Option<String> 
             "a row has more cells than the header (Markdown ignores the extra cells)".into(),
         );
     }
-    let one_line_comment = |l: &str| {
-        let (ind, rest) = indent_of(l);
-        ind <= 3 && rest.starts_with("<!--") && rest[4..].contains("-->")
-    };
     if start > 0 && has_unescaped_pipe(lines[start - 1]) && !one_line_comment(lines[start - 1]) {
         return Some("the line above the table has a `|` but does not start with one; where the table begins is unclear".into());
     }
     // Inside an HTML block (it runs to the next blank line), a pipe table is
     // literal text. A one-line `<!-- ... -->` comment ends its own block.
-    let mut k = start;
-    while k > 0 && !is_blank(lines[k - 1]) {
-        k -= 1;
-        if one_line_comment(lines[k]) {
-            break;
-        }
-        let (ind, rest) = indent_of(lines[k]);
-        if ind <= 3 && rest.starts_with('<') {
-            return Some(
-                "the table follows an HTML line without a blank line; Markdown may read it as HTML"
-                    .into(),
-            );
-        }
+    if html_above {
+        return Some(
+            "the table follows an HTML line without a blank line; Markdown may read it as HTML"
+                .into(),
+        );
     }
     None
 }
@@ -315,6 +332,10 @@ pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
     let mut fence: Option<(char, usize)> = None;
     let mut html_end: Option<&'static str> = None;
     let mut org_block = false;
+    let html = match dialect {
+        Dialect::Markdown => html_above(lines),
+        Dialect::Org => Vec::new(),
+    };
     while i < lines.len() {
         let line = lines[i];
         match dialect {
@@ -385,7 +406,7 @@ pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
         let end = i;
         let (tblfm, md_has_org_tblfm) = formula_lines(lines, end, dialect, false);
         let decline = match dialect {
-            Dialect::Markdown => md_table_problem(lines, start, end),
+            Dialect::Markdown => md_table_problem(lines, start, end, html[start]),
             Dialect::Org => None,
         };
         out.push(Found {
@@ -599,6 +620,27 @@ impl Table {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    /// Work ticks ([`crate::work`]) to render the table: three regex passes
+    /// over every cell of the padded rectangle (width, cookie, number), the
+    /// width pass again in [`Table::render_checked`], and the output.
+    pub fn render_ticks(&self) -> u64 {
+        let ncols = self.ncols().max(1) as u64;
+        let mut t = 64 * self.lines.len() as u64;
+        for l in &self.lines {
+            match l {
+                Line::Data(f) => {
+                    t = t.saturating_add(4 * crate::work::scan_ticks(0) * ncols);
+                    for cell in f {
+                        let s = crate::work::scan_ticks(cell.len()) - crate::work::scan_ticks(0);
+                        t = t.saturating_add(4 * s + 2 * cell.len() as u64);
+                    }
+                }
+                Line::Hline => t = t.saturating_add(8 * ncols),
+            }
+        }
+        t
     }
 
     /// [`Table::render`], unless the aligned table would clearly be larger

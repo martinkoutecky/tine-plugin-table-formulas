@@ -5,6 +5,7 @@ pub mod calc;
 pub mod formula;
 pub mod printf;
 pub mod table;
+pub mod work;
 
 use formula::{Abort, Report};
 use table::{Dialect, Table};
@@ -45,12 +46,13 @@ pub enum Laps {
 /// Recalculate every table of `raw` that has a formula line, and align it.
 /// Lines outside those tables are kept byte for byte.
 pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
+    let _run = work::Run::start();
     let lines: Vec<&str> = raw.split('\n').collect();
     let bare: Vec<&str> = lines
         .iter()
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
-    let found = table::find_tables(&bare, dialect);
+    let found = find(raw, &bare, dialect);
     if found.is_empty() {
         return Ok(BlockResult::NoTable);
     }
@@ -60,7 +62,7 @@ pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
         });
     }
     let tables = found.iter().filter(|f| f.tblfm.is_some()).count();
-    let (new_raw, report) = process_text(raw, dialect, Laps::Times(1))?;
+    let (new_raw, report) = process_found(raw, &lines, &bare, &found, dialect, Laps::Times(1))?;
     if new_raw == raw {
         Ok(BlockResult::Unchanged { tables, report })
     } else {
@@ -78,18 +80,45 @@ pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
 /// for byte as it was (not even aligned), and the report names the formula:
 /// a partial recalculation could write values Org would not (review F1).
 pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, Report), Abort> {
+    // One work budget for the whole command: every table, every pass.
+    let _run = work::Run::start();
     let lines: Vec<&str> = raw.split('\n').collect();
     let bare: Vec<&str> = lines
         .iter()
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
-    let found = table::find_tables(&bare, dialect);
+    let found = find(raw, &bare, dialect);
+    process_found(raw, &lines, &bare, &found, dialect, laps)
+}
+
+/// Split the block and find its tables, charged: a few regex passes per
+/// line (table, fence, HTML and formula-line checks).
+fn find(raw: &str, bare: &[&str], dialect: Dialect) -> Vec<table::Found> {
+    let _ = work::ticks(
+        (bare.len() as u64)
+            .saturating_mul(8 * work::scan_ticks(0))
+            .saturating_add(8 * raw.len() as u64),
+    );
+    table::find_tables(bare, dialect)
+}
+
+/// The tables in `found` processed. Once the run's work budget is spent,
+/// every remaining table is declined and kept byte for byte (malformed
+/// input bound: a block that would run the guest past the host's
+/// invocation timeout).
+fn process_found(
+    raw: &str,
+    lines: &[&str],
+    bare: &[&str],
+    found: &[table::Found],
+    dialect: Dialect,
+    laps: Laps,
+) -> Result<(String, Report), Abort> {
     let mut report = Report {
         org_line_in_markdown: found.iter().any(|f| f.md_has_org_tblfm),
         ..Report::default()
     };
-    // One work budget for the whole command: every table, every pass.
-    let budget = formula::Budget::new();
+    let _ = work::ticks(16 * lines.len() as u64 + raw.len() as u64);
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut next = 0;
     for f in found
@@ -99,6 +128,13 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
         out.extend(lines[next..f.start].iter().map(|l| l.to_string()));
         next = f.end;
         let original = || lines[f.start..f.end].iter().map(|l| l.to_string());
+        let over_budget = |report: &mut Report| {
+            report.skip(
+                f.tblfm.as_deref().unwrap_or("(alignment)"),
+                formula::WORK_REASON,
+            );
+            report.declined_tables += 1;
+        };
         if let Some(why) = &f.decline {
             if let Some(tblfm) = &f.tblfm {
                 report.skip(tblfm, why);
@@ -107,9 +143,23 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
             out.extend(original());
             continue;
         }
-        let mut t: Table = table::parse_table(&bare[f.start..f.end], dialect);
+        let src = &bare[f.start..f.end];
+        let bytes: usize = src.iter().map(|l| l.len()).sum();
+        if !work::ticks(
+            64 * src.len() as u64 + 2 * work::scan_ticks(0) * src.len() as u64 + 4 * bytes as u64,
+        ) {
+            over_budget(&mut report);
+            out.extend(original());
+            continue;
+        }
+        let mut t: Table = table::parse_table(src, dialect);
         if laps != Laps::AlignOnly {
             let formulas = formula::parse_tblfm(f.tblfm.as_deref().unwrap_or(""))?;
+            if work::exhausted() {
+                over_budget(&mut report);
+                out.extend(original());
+                continue;
+            }
             let passes = match laps {
                 Laps::Times(n) => n,
                 _ => 10,
@@ -117,8 +167,10 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
             let mut converged = laps != Laps::Iterate;
             let mut last = Report::default();
             for _ in 0..passes {
+                // The copy and the comparison after the pass.
+                let _ = work::ticks(2 * table_ticks(&t));
                 let before = t.lines.clone();
-                last = formula::recalculate_in(&mut t, &formulas, &budget)?;
+                last = formula::recalculate_in(&mut t, &formulas)?;
                 if !last.skipped.is_empty() {
                     break;
                 }
@@ -141,6 +193,11 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
                 });
             }
         }
+        if !work::ticks(t.render_ticks()) {
+            over_budget(&mut report);
+            out.extend(original());
+            continue;
+        }
         let rendered = t.render_checked(MAX_RAW_UTF16).ok_or_else(|| Abort {
             formula: None,
             message: "the aligned table would exceed Tine's 128 KiB block limit".into(),
@@ -151,8 +208,21 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
         }
     }
     out.extend(lines[next..].iter().map(|l| l.to_string()));
-    report.work_used = budget.used();
+    let size: usize = out.iter().map(|l| l.len() + 1).sum();
+    let _ = work::text(2 * size);
+    report.work_used = work::used_units();
     Ok((out.join("\n"), report))
+}
+
+/// Ticks to copy or compare a table's cells.
+fn table_ticks(t: &Table) -> u64 {
+    t.lines
+        .iter()
+        .map(|l| match l {
+            table::Line::Data(f) => 16 + f.iter().map(|c| 16 + c.len() as u64 / 2).sum::<u64>(),
+            table::Line::Hline => 16,
+        })
+        .sum()
 }
 
 fn clip(mut s: String) -> String {

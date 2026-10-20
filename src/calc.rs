@@ -13,6 +13,7 @@
 //!   dates, units, unknown functions...). The caller keeps the cell unchanged
 //!   and says so, because guessing would write a value Org would not.
 
+use crate::work;
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::cmp::Ordering;
@@ -107,35 +108,63 @@ impl Default for Modes {
 }
 
 // ---------------------------------------------------------------- numbers
+//
+// Every step that does more than constant work charges the command's work
+// meter first ([`crate::work`]), by the sizes of its operands in limbs.
 
-fn pow10(n: i64) -> BigInt {
-    num_traits::pow::pow(BigInt::from(10), n.max(0) as usize)
+/// Charge `t` ticks of work; refuse once the command's budget is spent.
+fn w(t: u64) -> CResult<()> {
+    if work::ticks(t) {
+        Ok(())
+    } else {
+        unsupported(WORK_MSG)
+    }
 }
 
-pub fn numdigs(a: &BigInt) -> i64 {
+fn l(a: &BigInt) -> u64 {
+    work::limbs(a)
+}
+
+/// 10^n, charged before it is built.
+fn pow10(n: i64) -> CResult<BigInt> {
+    let n = n.max(0);
+    let r = work::digit_limbs(n as usize);
+    w(work::mul_ticks(r, r))?;
+    Ok(num_traits::pow::pow(BigInt::from(10), n as usize))
+}
+
+pub fn numdigs(a: &BigInt) -> CResult<i64> {
     if a.is_zero() {
-        0
-    } else if let Some(v) = a.magnitude().to_u128() {
-        v.ilog10() as i64 + 1
-    } else {
-        a.magnitude().to_string().len() as i64
+        return Ok(0);
     }
+    if let Some(v) = a.magnitude().to_u128() {
+        return Ok(v.ilog10() as i64 + 1);
+    }
+    w(work::decimal_ticks(l(a)))?;
+    Ok(a.magnitude().to_string().len() as i64)
 }
 
 /// Multiply `a` by 10^n, rounding half away from zero when n < 0.
-fn scale_rounding(a: &BigInt, n: i64) -> BigInt {
+fn scale_rounding(a: &BigInt, n: i64) -> CResult<BigInt> {
     if n >= 0 {
-        return a * pow10(n);
+        let p = pow10(n)?;
+        w(work::mul_ticks(l(a), l(&p)))?;
+        return Ok(a * p);
     }
     if a.is_negative() {
-        return -scale_rounding(&-a, n);
+        w(work::add_ticks(l(a), 0))?;
+        return Ok(-scale_rounding(&-a, n)?);
     }
     let shifted = if n == -1 {
+        w(work::add_ticks(l(a), 0))?;
         a.clone()
     } else {
-        a / pow10(-1 - n)
+        let p = pow10(-1 - n)?;
+        w(work::mul_ticks(l(a), l(&p)))?;
+        a / p
     };
-    (shifted + BigInt::from(5)) / BigInt::from(10)
+    w(2 * work::add_ticks(l(&shifted), 1))?;
+    Ok((shifted + BigInt::from(5)) / BigInt::from(10))
 }
 
 pub fn make_float(m: BigInt, e: i64, prec: i64) -> CResult<Num> {
@@ -144,13 +173,18 @@ pub fn make_float(m: BigInt, e: i64, prec: i64) -> CResult<Num> {
     }
     let mut m = m;
     let mut e = e;
-    let ldiff = prec - numdigs(&m);
+    let ldiff = prec - numdigs(&m)?;
     if ldiff < 0 {
-        m = scale_rounding(&m, ldiff);
+        m = scale_rounding(&m, ldiff)?;
         e -= ldiff;
     }
     let ten = BigInt::from(10);
-    while !m.is_zero() && (&m % &ten).is_zero() {
+    loop {
+        // A remainder and a division by 10 per trailing zero.
+        w(2 * work::add_ticks(l(&m), 1))?;
+        if m.is_zero() || !(&m % &ten).is_zero() {
+            break;
+        }
         m /= &ten;
         e += 1;
     }
@@ -162,11 +196,17 @@ pub fn make_float(m: BigInt, e: i64, prec: i64) -> CResult<Num> {
 
 fn to_float(a: &Num, prec: i64) -> CResult<(BigInt, i64)> {
     match a {
-        Num::Int(i) => match make_float(i.clone(), 0, prec)? {
-            Num::Float { m, e } => Ok((m, e)),
-            Num::Int(_) => unreachable_num(),
-        },
-        Num::Float { m, e } => Ok((m.clone(), *e)),
+        Num::Int(i) => {
+            w(work::add_ticks(l(i), 0))?;
+            match make_float(i.clone(), 0, prec)? {
+                Num::Float { m, e } => Ok((m, e)),
+                Num::Int(_) => unreachable_num(),
+            }
+        }
+        Num::Float { m, e } => {
+            w(work::add_ticks(l(m), 0))?;
+            Ok((m.clone(), *e))
+        }
     }
 }
 
@@ -190,42 +230,57 @@ fn float_of(a: &Num, prec: i64) -> CResult<Num> {
     Ok(Num::Float { m, e })
 }
 
+fn mantissa(a: &Num) -> &BigInt {
+    match a {
+        Num::Int(i) => i,
+        Num::Float { m, .. } => m,
+    }
+}
+
+/// A copy of `a`, charged.
+fn copy(a: &Num) -> CResult<Num> {
+    w(work::add_ticks(l(mantissa(a)), 0))?;
+    Ok(a.clone())
+}
+
 pub fn add(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
     if let (Num::Int(x), Num::Int(y)) = (a, b) {
+        w(work::add_ticks(l(x), l(y)))?;
         return Ok(Num::Int(int_budget(x + y)?));
     }
     if is_zero(a) {
         return if is_float(a) && !is_float(b) {
             float_of(b, prec)
         } else {
-            Ok(b.clone())
+            copy(b)
         };
     }
     if is_zero(b) {
         return if is_float(b) && !is_float(a) {
             float_of(a, prec)
         } else {
-            Ok(a.clone())
+            copy(a)
         };
     }
     let (ma, ea) = to_float(a, prec)?;
     let (mb, eb) = to_float(b, prec)?;
     let ediff = ea - eb;
-    if ediff >= 0 {
-        if ediff >= prec + prec {
-            return Ok(Num::Float { m: ma, e: ea });
-        }
-        make_float(mb + ma * pow10(ediff), eb, prec)
+    let (hi, ehi, lo, elo, ediff) = if ediff >= 0 {
+        (ma, ea, mb, eb, ediff)
     } else {
-        let ediff = -ediff;
-        if ediff >= prec + prec {
-            return Ok(Num::Float { m: mb, e: eb });
-        }
-        make_float(ma + mb * pow10(ediff), ea, prec)
+        (mb, eb, ma, ea, -ediff)
+    };
+    if ediff >= prec + prec {
+        return Ok(Num::Float { m: hi, e: ehi });
     }
+    let p = pow10(ediff)?;
+    w(work::mul_ticks(l(&hi), l(&p)) + work::add_ticks(l(&hi) + l(&p), l(&lo)))?;
+    make_float(lo + hi * p, elo, prec)
 }
 
+/// `-a`. Its copy is charged without a check (the next charge refuses).
 pub fn neg(a: &Num) -> Num {
+    let _ = work::ticks(work::add_ticks(l(mantissa(a)), 0));
     match a {
         Num::Int(i) => Num::Int(-i),
         Num::Float { m, e } => Num::Float { m: -m, e: *e },
@@ -241,30 +296,36 @@ pub fn mul(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
         if x.bits() + y.bits() > MAX_INT_BITS + 1 {
             return unsupported("an integer with more than 2000 digits");
         }
+        w(work::mul_ticks(l(x), l(y)))?;
         return Ok(Num::Int(int_budget(x * y)?));
     }
     if is_zero(a) {
         return if is_float(b) && !is_float(a) {
             float_of(a, prec)
         } else {
-            Ok(a.clone())
+            copy(a)
         };
     }
     if is_zero(b) {
         return if is_float(a) && !is_float(b) {
             float_of(b, prec)
         } else {
-            Ok(b.clone())
+            copy(b)
         };
     }
     let (ma, ea) = to_float(a, prec)?;
     let (mb, eb) = to_float(b, prec)?;
+    w(work::mul_ticks(l(&ma), l(&mb)))?;
     make_float(ma * mb, ea + eb, prec)
 }
 
 fn div_float(ma: BigInt, ea: i64, mb: BigInt, eb: i64, prec: i64) -> CResult<Num> {
-    let ldiff = (prec + 1 - (numdigs(&ma) - numdigs(&mb))).max(0);
-    let q = (ma * pow10(ldiff)) / mb;
+    let ldiff = (prec + 1 - (numdigs(&ma)? - numdigs(&mb)?)).max(0);
+    let p = pow10(ldiff)?;
+    w(work::mul_ticks(l(&ma), l(&p)))?;
+    let n = ma * p;
+    w(work::mul_ticks(l(&n), l(&mb)))?;
+    let q = n / mb;
     make_float(q, ea - eb - ldiff, prec)
 }
 
@@ -276,10 +337,12 @@ pub fn div(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
         return if is_float(b) && !is_float(a) {
             float_of(a, prec)
         } else {
-            Ok(a.clone())
+            copy(a)
         };
     }
     if let (Num::Int(x), Num::Int(y)) = (a, b) {
+        // A quotient and a remainder.
+        w(2 * work::mul_ticks(l(x), l(y)))?;
         let q = x / y;
         let r = x % y;
         if r.is_zero() {
@@ -301,17 +364,41 @@ pub fn renormalize(a: Num, prec: i64) -> CResult<Num> {
     }
 }
 
-pub fn compare(a: &Num, b: &Num) -> Ordering {
+/// Exact comparison. Signs decide first, then the position of the leading
+/// digit; only numbers of the same magnitude are scaled to a common exponent,
+/// so `1e9999` against `1e-9999` builds no 20,000-digit power of ten (registry
+/// audit, 2026-10-20).
+pub fn compare(a: &Num, b: &Num) -> CResult<Ordering> {
     let (ma, ea) = match a {
-        Num::Int(i) => (i.clone(), 0),
-        Num::Float { m, e } => (m.clone(), *e),
+        Num::Int(i) => (i, 0),
+        Num::Float { m, e } => (m, *e),
     };
     let (mb, eb) = match b {
-        Num::Int(i) => (i.clone(), 0),
-        Num::Float { m, e } => (m.clone(), *e),
+        Num::Int(i) => (i, 0),
+        Num::Float { m, e } => (m, *e),
     };
+    let (sa, sb) = (ma.sign(), mb.sign());
+    if sa != sb || sa == num_bigint::Sign::NoSign {
+        // Minus < NoSign < Plus.
+        return Ok(sa.cmp(&sb));
+    }
+    // Same sign, both non-zero: |x| = |m| 10^e with d digits lies in
+    // [10^(d-1+e), 10^(d+e)).
+    let (da, db) = (numdigs(ma)? + ea, numdigs(mb)? + eb);
+    if da != db {
+        let ord = da.cmp(&db);
+        return Ok(if sa == num_bigint::Sign::Minus {
+            ord.reverse()
+        } else {
+            ord
+        });
+    }
     let e = ea.min(eb);
-    (ma * pow10(ea - e)).cmp(&(mb * pow10(eb - e)))
+    let (pa, pb) = (pow10(ea - e)?, pow10(eb - e)?);
+    w(work::mul_ticks(l(ma), l(&pa)) + work::mul_ticks(l(mb), l(&pb)))?;
+    let (xa, xb) = (ma * pa, mb * pb);
+    w(work::add_ticks(l(&xa), l(&xb)))?;
+    Ok(xa.cmp(&xb))
 }
 
 fn pow_int(base: &BigInt, exp: &BigInt) -> CResult<BigInt> {
@@ -324,6 +411,9 @@ fn pow_int(base: &BigInt, exp: &BigInt) -> CResult<BigInt> {
     if base.bits().saturating_sub(1).saturating_mul(n as u64) > MAX_INT_BITS {
         return unsupported("an integer with more than 2000 digits");
     }
+    // Squarings up to the result's size, plus one step per exponent bit.
+    let r = base.bits().saturating_mul(n as u64) / 64 + 1;
+    w(2 * work::mul_ticks(r, r) + 64 * (32 - n.leading_zeros() as u64))?;
     int_budget(num_traits::pow::pow(base.clone(), n as usize))
 }
 
@@ -334,6 +424,7 @@ pub fn read_number(s: &str, prec: i64) -> CResult<Num> {
     if s.len() > MAX_LITERAL_DIGITS {
         return unsupported("a number with more than 2000 digits");
     }
+    w(work::text_ticks(s.len()) + work::decimal_ticks(work::digit_limbs(s.len())))?;
     let (mant, exp) = match s.find(['e', 'E']) {
         Some(i) => (&s[..i], Some(&s[i + 1..])),
         None => (s, None),
@@ -386,23 +477,36 @@ pub fn read_number(s: &str, prec: i64) -> CResult<Num> {
 
 // ---------------------------------------------------------------- display
 
-fn format_float_pos(m: &BigInt, e: i64, modes: &Modes) -> String {
+/// `"0".repeat(n)`, charged.
+fn zeros(n: i64) -> CResult<String> {
+    let n = n.max(0) as usize;
+    w(work::text_ticks(n))?;
+    Ok("0".repeat(n))
+}
+
+/// Decimal text of `m`, charged.
+fn decimal(m: &BigInt) -> CResult<String> {
+    w(work::decimal_ticks(l(m)))?;
+    Ok(m.to_string())
+}
+
+fn format_float_pos(m: &BigInt, e: i64, modes: &Modes) -> CResult<String> {
     let mut figs = modes.figs;
     let kind = modes.kind;
-    if kind == FloatKind::Fix && (figs < 0 || e + numdigs(m) > -figs) {
+    if kind == FloatKind::Fix && (figs < 0 || e + numdigs(m)? > -figs) {
         if figs < 0 {
             figs = -figs;
         }
-        let mant = scale_rounding(m, e + figs);
-        let mut s = mant.to_string();
+        let mant = scale_rounding(m, e + figs)?;
+        let mut s = decimal(&mant)?;
         if (s.len() as i64) <= figs {
-            s = format!("{}{}", "0".repeat((figs - s.len() as i64 + 1) as usize), s);
+            s = format!("{}{}", zeros(figs - s.len() as i64 + 1)?, s);
         }
         if figs > 0 {
             let cut = s.len() - figs as usize;
-            return format!("{}.{}", &s[..cut], &s[cut..]);
+            return Ok(format!("{}.{}", &s[..cut], &s[cut..]));
         }
-        return format!("{s}.");
+        return Ok(format!("{s}."));
     }
     if figs < 0 {
         figs += modes.prec;
@@ -410,26 +514,26 @@ fn format_float_pos(m: &BigInt, e: i64, modes: &Modes) -> String {
     let mut m = m.clone();
     let mut e = e;
     if figs > 0 {
-        let adj = figs - numdigs(&m);
+        let adj = figs - numdigs(&m)?;
         if adj < 0 {
-            m = scale_rounding(&m, adj);
+            m = scale_rounding(&m, adj)?;
             e -= adj;
         }
     }
-    let s = m.to_string();
+    let s = decimal(&m)?;
     let len = s.len() as i64;
     let dpos = e + len;
     if kind == FloatKind::Float && dpos <= modes.prec && dpos >= -1 {
-        if dpos == 0 {
+        Ok(if dpos == 0 {
             format!("0.{s}")
         } else if e <= 0 && dpos > 0 {
             let d = dpos as usize;
             format!("{}.{}", &s[..d], &s[d..])
         } else if e > 0 {
-            format!("{s}{}.", "0".repeat(e as usize))
+            format!("{s}{}.", zeros(e)?)
         } else {
-            format!("0.{}{s}", "0".repeat((-dpos) as usize))
-        }
+            format!("0.{}{s}", zeros(-dpos)?)
+        })
     } else {
         let eadj = e + len;
         let scale: i64 = if kind == FloatKind::Eng {
@@ -439,22 +543,23 @@ fn format_float_pos(m: &BigInt, e: i64, modes: &Modes) -> String {
         };
         let mut s = s;
         if scale > s.len() as i64 {
-            s.push_str(&"0".repeat((scale - s.len() as i64) as usize));
+            s.push_str(&zeros(scale - s.len() as i64)?);
         }
         if scale < s.len() as i64 {
             let k = scale as usize;
             s = format!("{}.{}", &s[..k], &s[k..]);
         }
-        format!("{s}e{}", eadj - scale)
+        Ok(format!("{s}e{}", eadj - scale))
     }
 }
 
-pub fn format_num(a: &Num, modes: &Modes) -> String {
+pub fn format_num(a: &Num, modes: &Modes) -> CResult<String> {
     match a {
-        Num::Int(i) => i.to_string(),
+        Num::Int(i) => decimal(i),
         Num::Float { m, e } => {
             if m.is_negative() {
-                format!("-{}", format_float_pos(&-m, *e, modes))
+                w(work::add_ticks(l(m), 0))?;
+                Ok(format!("-{}", format_float_pos(&-m, *e, modes)?))
             } else {
                 format_float_pos(m, *e, modes)
             }
@@ -465,13 +570,15 @@ pub fn format_num(a: &Num, modes: &Modes) -> String {
 /// Display a final result the way `calc-eval` returns it.
 pub fn display(v: &Value, modes: &Modes) -> CResult<String> {
     match v {
-        Value::Num(n) => Ok(format_num(n, modes)),
+        Value::Num(n) => format_num(n, modes),
         Value::Nan => Ok("nan".to_string()),
         Value::Inf(1) => Ok("inf".to_string()),
         Value::Inf(-1) => Ok("-inf".to_string()),
         Value::Inf(_) => Ok("uinf".to_string()),
-        Value::Sym(s) => Ok(s.clone()),
-        Value::Text(s) => Ok(s.clone()),
+        Value::Sym(s) | Value::Text(s) => {
+            w(work::text_ticks(s.len()))?;
+            Ok(s.clone())
+        }
         Value::Str(_) => unsupported("a string literal as the result"),
         Value::Vec(_) => unsupported("a vector as the result"),
     }
@@ -492,11 +599,17 @@ enum Tok {
 /// not a plain unknown, so we do not try to reproduce what Calc does with it.
 const SPECIAL_SYMBOLS: &[&str] = &["e", "pi", "i", "gamma", "phi"];
 
+/// Work for one token: its allocation, the punctuation table and the
+/// parser's steps over it (its characters are charged with the whole text).
+const TOKEN_TICKS: u64 = 96;
+
 fn tokenize(src: &str) -> CResult<Vec<Tok>> {
+    w(work::text_ticks(src.len()).saturating_mul(4))?;
     let s: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while i < s.len() {
+        w(TOKEN_TICKS)?;
         let c = s[i];
         if c == ' ' || c == '\n' || c == '\t' {
             i += 1;
@@ -576,8 +689,15 @@ fn tokenize(src: &str) -> CResult<Vec<Tok>> {
             "~=", "<=", ">=", "<>", "/=", "+/-", "\\dots", "\\ldots", "**", "<<", ">>", "==", "!=",
             "&&&", "|||", "!!!", "&&", "||", "!!", ":=", "::", "=>",
         ];
-        let rest: String = s[i..s.len().min(i + 7)].iter().collect();
-        if let Some(m) = MULTI.iter().find(|m| rest.starts_with(**m)) {
+        let rest = &s[i..];
+        let starts = |m: &str| {
+            let mut k = 0;
+            m.chars().all(|c| {
+                k += 1;
+                rest.get(k - 1) == Some(&c)
+            })
+        };
+        if let Some(m) = MULTI.iter().find(|m| starts(m)) {
             out.push(Tok::Punc((*m).to_string()));
             i += m.chars().count();
             continue;
@@ -679,23 +799,32 @@ impl Parser {
     }
     /// Whether the bracket just opened has a comma at its own level
     /// (`math-check-for-commas`).
-    fn vector_has_comma(&self) -> bool {
+    /// Charged per token it looks at: brackets nested 200 deep each scan
+    /// forward, so this is not covered by the per-token charge.
+    fn vector_has_comma(&self) -> CResult<bool> {
         let mut depth = 0i32;
+        let mut seen = 0u64;
+        let mut found = false;
         for t in &self.toks[self.pos..] {
+            seen += 1;
             match t {
                 Tok::Punc(p) if matches!(p.as_str(), "[" | "(" | "{") => depth += 1,
                 Tok::Punc(p) if matches!(p.as_str(), "]" | ")" | "}") => {
                     depth -= 1;
                     if depth < 0 {
-                        return false;
+                        break;
                     }
                 }
-                Tok::Punc(p) if p == "," && depth == 0 => return true,
-                Tok::End => return false,
+                Tok::Punc(p) if p == "," && depth == 0 => {
+                    found = true;
+                    break;
+                }
+                Tok::End => break,
                 _ => {}
             }
         }
-        false
+        w(8 + 4 * seen)?;
+        Ok(found)
     }
     fn is_punc(&self, p: &str) -> bool {
         matches!(self.peek(), Tok::Punc(q) if q == p)
@@ -713,6 +842,9 @@ impl Parser {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return unsupported("a formula nested too deeply");
+        }
+        if work::exhausted() {
+            return unsupported(WORK_MSG);
         }
         let r = self.expr_inner(min_prec);
         self.depth -= 1;
@@ -829,7 +961,7 @@ impl Parser {
                     // spaces as separators (`[2 3]` is a two-element vector,
                     // `[2 3, 4]` is `[6, 4]`). The tokens do not keep spaces,
                     // so only a single plain element is accepted there.
-                    let comma = self.vector_has_comma();
+                    let comma = self.vector_has_comma()?;
                     let (items, d) = self.args("]")?;
                     let plain = |e: &Expr| match e {
                         Expr::Num(_) | Expr::Str(_) | Expr::Sym(_) => true,
@@ -897,40 +1029,11 @@ fn add_values(a: &Value, b: &Value, prec: i64) -> CResult<Value> {
 
 pub struct Eval {
     pub modes: Modes,
-    /// Work done so far, in ticks ([`TICKS_PER_UNIT`] make one unit of the
-    /// formula engine's per-command budget).
-    ticks: std::cell::Cell<u64>,
-    /// Ticks this evaluation may use before it is refused.
-    max_ticks: u64,
 }
 
-/// Calc work is counted in ticks: [`NODE_TICKS`] per syntax node, and for
-/// arithmetic the operands' sizes in 64-bit limbs, added for `+`, `-` and
-/// comparisons and multiplied for `*` and `/` (schoolbook cost). A power is
-/// charged as the square of its result's size, reading a literal and
-/// printing the result as four times the square of their size (decimal
-/// conversion is quadratic). [`TICKS_PER_UNIT`] ticks are one unit of the
-/// formula engine's budget (about 2.5 us in the release guest); measured
-/// there (2026-10-20), one unit's time does about 1,000 ticks of this work,
-/// so it is charged at about twice its time.
-pub const TICKS_PER_UNIT: u64 = 512;
+/// Work for one syntax node or one vector element visited, besides its
+/// arithmetic (charged by the number functions above).
 const NODE_TICKS: u64 = 64;
-
-fn limbs_num(n: &Num) -> u64 {
-    match n {
-        Num::Int(i) => i.bits() / 64 + 1,
-        Num::Float { m, .. } => m.bits() / 64 + 1,
-    }
-}
-
-fn limbs(v: &Value) -> u64 {
-    match v {
-        Value::Num(n) => limbs_num(n),
-        Value::Vec(items) => items.iter().map(limbs).fold(1u64, u64::saturating_add),
-        Value::Str(s) => s.len() as u64 / 8 + 1,
-        _ => 1,
-    }
-}
 
 fn truth(v: &Value) -> CResult<bool> {
     match v {
@@ -939,14 +1042,39 @@ fn truth(v: &Value) -> CResult<bool> {
     }
 }
 
-fn flatten(v: &Value, out: &mut Vec<Value>) {
+/// The elements of nested vectors (a string as its character codes), each
+/// copy charged.
+fn flatten(v: &Value, out: &mut Vec<Value>) -> CResult<()> {
     match v {
-        Value::Vec(items) => items.iter().for_each(|i| flatten(i, out)),
-        Value::Str(s) => s
-            .chars()
-            .for_each(|c| out.push(Value::Num(Num::Int(BigInt::from(c as u32))))),
-        other => out.push(other.clone()),
+        Value::Vec(items) => {
+            for i in items {
+                flatten(i, out)?;
+            }
+        }
+        Value::Str(s) => {
+            for c in s.chars() {
+                w(NODE_TICKS)?;
+                out.push(Value::Num(Num::Int(BigInt::from(c as u32))));
+            }
+        }
+        other => {
+            let size = match other {
+                Value::Num(n) => l(mantissa(n)),
+                _ => 1,
+            };
+            w(NODE_TICKS + size)?;
+            out.push(other.clone());
+        }
     }
+    Ok(())
+}
+
+fn flatten_all(vals: &[Value]) -> CResult<Vec<Value>> {
+    let mut items = Vec::new();
+    for v in vals {
+        flatten(v, &mut items)?;
+    }
+    Ok(items)
 }
 
 impl Eval {
@@ -954,26 +1082,14 @@ impl Eval {
         self.modes.prec
     }
 
-    /// Charge `ticks` of work; refuse once over the budget.
-    fn charge(&self, ticks: u64) -> CResult<()> {
-        let t = self.ticks.get().saturating_add(ticks);
-        self.ticks.set(t);
-        if t > self.max_ticks {
-            return unsupported(WORK_MSG);
-        }
-        Ok(())
-    }
-
     pub fn eval(&self, e: &Expr) -> CResult<Value> {
-        self.charge(NODE_TICKS)?;
+        w(NODE_TICKS)?;
         match e {
-            Expr::Num(s) => {
-                // Reading decimal digits is quadratic in their number.
-                let l = s.len() as u64 / 19 + 1;
-                self.charge(l.saturating_mul(l).saturating_mul(4))?;
-                Ok(Value::Num(read_number(s, self.prec())?))
+            Expr::Num(s) => Ok(Value::Num(read_number(s, self.prec())?)),
+            Expr::Str(s) => {
+                w(work::text_ticks(s.len()))?;
+                Ok(Value::Str(s.clone()))
             }
-            Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Sym(name) => {
                 match name.as_str() {
                     "nan" => return Ok(Value::Nan),
@@ -1026,42 +1142,26 @@ impl Eval {
             let (Value::Num(xn), Value::Num(yn)) = (&x, &y) else {
                 return unsupported(format!("`{op}` on a non-number"));
             };
-            return Ok(Value::Num(if op == "&&" {
+            let pick = if op == "&&" {
                 if is_zero(xn) {
-                    xn.clone()
+                    xn
                 } else {
-                    yn.clone()
+                    yn
                 }
             } else if is_zero(xn) {
-                yn.clone()
+                yn
             } else {
-                xn.clone()
-            }));
+                xn
+            };
+            return Ok(Value::Num(copy(pick)?));
         }
         let x = self.eval(a)?;
         let y = self.eval(b)?;
-        let (lx, ly) = (limbs(&x), limbs(&y));
-        let cost = if op == "^" {
-            // The result has about bits(x) * y bits (pow_int refuses big
-            // ones before computing them).
-            let (bits, e) = match (&x, &y) {
-                (Value::Num(Num::Int(b)), Value::Num(Num::Int(n))) => {
-                    (b.bits(), n.to_u64().unwrap_or(u64::MAX))
-                }
-                _ => (64, 1),
-            };
-            let r = (bits.saturating_mul(e) / 64 + 1).min(1 << 20);
-            r.saturating_mul(r)
-        } else if op == "*" || op == "/" {
-            lx.saturating_mul(ly).saturating_add(lx).saturating_add(ly)
-        } else {
-            lx.saturating_add(ly)
-        };
-        self.charge(cost)?;
         if COMPARISONS.contains(&op) {
             let bool_val =
                 |t: bool| Value::Num(Num::Int(if t { BigInt::one() } else { BigInt::zero() }));
             if let (Value::Str(s), Value::Str(t)) = (&x, &y) {
+                w(work::text_ticks(s.len().min(t.len())))?;
                 return match op {
                     "==" => Ok(bool_val(s == t)),
                     "!=" => Ok(bool_val(s != t)),
@@ -1069,7 +1169,7 @@ impl Eval {
                 };
             }
             let (xn, yn) = self.num_pair(x, y, op)?;
-            let ord = compare(&xn, &yn);
+            let ord = compare(&xn, &yn)?;
             return Ok(bool_val(match op {
                 "<" => ord == Ordering::Less,
                 ">" => ord == Ordering::Greater,
@@ -1090,8 +1190,6 @@ impl Eval {
         }
         let (xn, yn) = self.num_pair(x, y, op)?;
         Ok(Value::Num(match op {
-            "+" => add(&xn, &yn, prec)?,
-            "-" => sub(&xn, &yn, prec)?,
             "*" => mul(&xn, &yn, prec)?,
             "/" => div(&xn, &yn, prec)?,
             "^" => match (&xn, &yn) {
@@ -1108,26 +1206,14 @@ impl Eval {
 
     fn reduce(&self, args: &[Value], add_not_mul: bool) -> CResult<Value> {
         let inner = self.prec() + 2;
-        let mut items = Vec::new();
-        args.iter().for_each(|a| flatten(a, &mut items));
+        let items = flatten_all(args)?;
         let mut acc: Option<Value> = None;
         for it in items {
-            let la = acc.as_ref().map_or(1, limbs);
-            let lb = limbs(&it);
-            let op_ticks = if add_not_mul {
-                la.saturating_add(lb)
-            } else {
-                la.saturating_mul(lb)
-            };
-            self.charge(op_ticks.saturating_add(NODE_TICKS))?;
+            w(NODE_TICKS)?;
             acc = Some(match (acc, it) {
                 (None, v @ (Value::Num(_) | Value::Nan | Value::Inf(_))) => v,
                 (Some(a), b) if add_not_mul => add_values(&a, &b, inner)?,
-                (Some(Value::Num(a)), Value::Num(b)) => Value::Num(if add_not_mul {
-                    add(&a, &b, inner)?
-                } else {
-                    mul(&a, &b, inner)?
-                }),
+                (Some(Value::Num(a)), Value::Num(b)) => Value::Num(mul(&a, &b, inner)?),
                 (_, Value::Sym(s)) => {
                     return unsupported(format!("symbolic value `{s}` in a vector"))
                 }
@@ -1165,19 +1251,19 @@ impl Eval {
             "vsum" => self.reduce(&vals, true),
             "vprod" => self.reduce(&vals, false),
             "vmean" => {
-                let mut items = Vec::new();
-                vals.iter().for_each(|a| flatten(a, &mut items));
+                let items = flatten_all(&vals)?;
                 if items.is_empty() {
                     return unsupported("`vmean` of an empty vector");
                 }
                 let inner = self.prec() + 2;
                 let mut sum: Option<Num> = None;
                 for it in &items {
+                    w(NODE_TICKS)?;
                     let Value::Num(n) = it else {
                         return unsupported("`vmean` of a vector with a non-number");
                     };
                     sum = Some(match sum {
-                        None => n.clone(),
+                        None => copy(n)?,
                         Some(s) => add(&s, n, inner)?,
                     });
                 }
@@ -1188,8 +1274,7 @@ impl Eval {
                 Ok(Value::Num(renormalize(q, self.prec())?))
             }
             "vmax" | "vmin" => {
-                let mut items = Vec::new();
-                vals.iter().for_each(|a| flatten(a, &mut items));
+                let items = flatten_all(&vals)?;
                 if items.is_empty() {
                     return unsupported(format!(
                         "`{name}` of an empty vector (Calc gives an infinity)"
@@ -1197,20 +1282,21 @@ impl Eval {
                 }
                 let mut best: Option<Num> = None;
                 for it in &items {
+                    w(NODE_TICKS)?;
                     let Value::Num(n) = it else {
                         return unsupported(format!("`{name}` of a vector with a non-number"));
                     };
                     best = Some(match best {
-                        None => n.clone(),
+                        None => copy(n)?,
                         Some(b) => {
-                            let ord = compare(n, &b);
+                            let ord = compare(n, &b)?;
                             let better = if name == "vmax" {
                                 ord == Ordering::Greater
                             } else {
                                 ord == Ordering::Less
                             };
                             if better {
-                                n.clone()
+                                copy(n)?
                             } else {
                                 b
                             }
@@ -1223,13 +1309,12 @@ impl Eval {
                 }
             }
             "vcount" => {
-                let mut items = Vec::new();
                 for v in &vals {
                     if let Value::Sym(s) = v {
                         return unsupported(format!("symbolic value `{s}` in `vcount`"));
                     }
-                    flatten(v, &mut items);
                 }
+                let items = flatten_all(&vals)?;
                 Ok(Value::Num(Num::Int(BigInt::from(items.len()))))
             }
             "vlen" => {
@@ -1238,7 +1323,10 @@ impl Eval {
                 }
                 match &vals[0] {
                     Value::Vec(items) => Ok(Value::Num(Num::Int(BigInt::from(items.len())))),
-                    Value::Str(s) => Ok(Value::Num(Num::Int(BigInt::from(s.chars().count())))),
+                    Value::Str(s) => {
+                        w(work::text_ticks(s.len()))?;
+                        Ok(Value::Num(Num::Int(BigInt::from(s.chars().count()))))
+                    }
                     Value::Num(_) | Value::Nan | Value::Inf(_) => {
                         Ok(Value::Num(Num::Int(BigInt::zero())))
                     }
@@ -1246,7 +1334,10 @@ impl Eval {
                 }
             }
             "string" => match vals.as_slice() {
-                [Value::Str(s)] => Ok(Value::Text(s.clone())),
+                [Value::Str(s)] => {
+                    w(work::text_ticks(s.len()))?;
+                    Ok(Value::Text(s.clone()))
+                }
                 _ => unsupported("`string` of something other than a string literal"),
             },
             "sum" | "mean" => unsupported(format!(
@@ -1257,46 +1348,28 @@ impl Eval {
     }
 }
 
-/// Evaluate a Calc expression string under `modes`. With `num_only`
-/// (`calc-eval ... 'num`), a non-numeric result is a Calc error.
-pub fn calc_eval(src: &str, modes: Modes, num_only: bool) -> CResult<String> {
-    calc_eval_budget(src, modes, num_only, u64::MAX / TICKS_PER_UNIT).0
-}
-
-/// The reason given when an evaluation runs out of its work budget.
+/// The reason given when an evaluation runs out of the command's work budget.
 pub const WORK_MSG: &str = "the formulas need more computation than the plugin allows in one run";
 
-/// [`calc_eval`] with a budget of `max_units` engine units; also returns the
-/// units used (rounded up), whether or not the evaluation finished.
-pub fn calc_eval_budget(
-    src: &str,
-    modes: Modes,
-    num_only: bool,
-    max_units: u64,
-) -> (CResult<String>, u64) {
-    let ev = Eval {
-        modes,
-        ticks: std::cell::Cell::new(0),
-        max_ticks: max_units.saturating_mul(TICKS_PER_UNIT),
-    };
-    let r = calc_run(&ev, src, num_only);
-    (r, ev.ticks.get().div_ceil(TICKS_PER_UNIT))
-}
-
-fn calc_run(ev: &Eval, src: &str, num_only: bool) -> CResult<String> {
-    let modes = ev.modes;
+/// Evaluate a Calc expression string under `modes`. With `num_only`
+/// (`calc-eval ... 'num`), a non-numeric result is a Calc error. Its work is
+/// charged to the command's meter ([`crate::work`]); once that is spent the
+/// result is [`Outcome::Unsupported`] with [`WORK_MSG`].
+pub fn calc_eval(src: &str, modes: Modes, num_only: bool) -> CResult<String> {
+    let ev = Eval { modes };
     let expr = parse(src)?;
     let v = ev.eval(&expr)?;
-    // Printing a big integer in decimal is quadratic in its size.
-    let l = limbs(&v);
-    ev.charge(l.saturating_mul(l).saturating_mul(4))?;
     if num_only && !matches!(v, Value::Num(_)) {
         return match v {
             Value::Sym(_) | Value::Nan | Value::Inf(_) => calc_error("number expected"),
             _ => unsupported("a non-numeric result with the N flag"),
         };
     }
-    display(&v, &modes)
+    let out = display(&v, &modes)?;
+    if work::exhausted() {
+        return unsupported(WORK_MSG);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

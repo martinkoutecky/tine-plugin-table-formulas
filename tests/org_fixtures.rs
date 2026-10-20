@@ -226,44 +226,68 @@ fn markdown_form_matches_org_cells() {
             .map(|r| split_row(r, Dialect::Org).len())
             .max()
             .unwrap_or(1);
-        let header = format!(
-            "|{}|",
-            (1..=ncol)
-                .map(|i| format!(" h{i} "))
-                .collect::<Vec<_>>()
-                .join("|")
-        );
-        let delim = format!("|{}|", vec!["---"; ncol].join("|"));
-        let md = format!(
-            "{header}\n{delim}\n{}\n<!-- TBLFM: {} -->\n",
-            rows.join("\n"),
-            formula.trim()
-        );
-        let (out, report) = match process_text(&md, Dialect::Markdown, Laps::Times(1)) {
-            Ok(r) => r,
-            Err(a) => {
-                failures.push(format!("{id}: aborted {a:?}"));
+        let org_width = expected
+            .lines()
+            .filter(|l| l.trim_start().starts_with('|'))
+            .map(|r| split_row(r, Dialect::Org).len())
+            .max()
+            .unwrap_or(1);
+        // Org widens the table for a column formula past its last column. A
+        // Markdown table cannot gain columns past its header (registry audit
+        // 2026-10-20): with the input's header the table is declined, and
+        // with a header as wide as Org's result the cells must match Org's.
+        for ncol in if org_width > ncol {
+            vec![ncol, org_width]
+        } else {
+            vec![ncol]
+        } {
+            let header = format!(
+                "|{}|",
+                (1..=ncol)
+                    .map(|i| format!(" h{i} "))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            );
+            let delim = format!("|{}|", vec!["---"; ncol].join("|"));
+            let md = format!(
+                "{header}\n{delim}\n{}\n<!-- TBLFM: {} -->\n",
+                rows.join("\n"),
+                formula.trim()
+            );
+            let (out, report) = match process_text(&md, Dialect::Markdown, Laps::Times(1)) {
+                Ok(r) => r,
+                Err(a) => {
+                    failures.push(format!("{id}: aborted {a:?}"));
+                    continue;
+                }
+            };
+            let body = |t: &str| -> Vec<Vec<String>> {
+                t.lines()
+                    .filter(|l| l.trim_start().starts_with('|'))
+                    .map(|l| split_row(l, Dialect::Markdown))
+                    .filter(|r| {
+                        !r.iter()
+                            .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':')))
+                    })
+                    .collect()
+            };
+            if ncol < org_width {
+                if out != md || !report.skipped.iter().any(|s| s.reason.contains("header")) {
+                    failures.push(format!(
+                    "{id}: a write past the Markdown header was not declined\n--- markdown in\n{md}--- got\n{out}"
+                ));
+                }
                 continue;
             }
-        };
-        let body = |t: &str| -> Vec<Vec<String>> {
-            t.lines()
-                .filter(|l| l.trim_start().starts_with('|'))
-                .map(|l| split_row(l, Dialect::Markdown))
-                .filter(|r| {
-                    !r.iter()
-                        .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':')))
-                })
-                .collect()
-        };
-        let got: Vec<Vec<String>> = body(&out).into_iter().skip(1).collect();
-        let want = body(expected);
-        if got != want || !report.skipped.is_empty() {
-            failures.push(format!(
-                "{id}:\n--- markdown in\n{md}--- got\n{out}\n--- Org\n{expected}"
-            ));
+            let got: Vec<Vec<String>> = body(&out).into_iter().skip(1).collect();
+            let want = body(expected);
+            if got != want || !report.skipped.is_empty() {
+                failures.push(format!(
+                    "{id}:\n--- markdown in\n{md}--- got\n{out}\n--- Org\n{expected}"
+                ));
+            }
+            checked += 1;
         }
-        checked += 1;
     }
     println!("markdown form: {checked} Emacs-oracle cases checked");
     assert!(checked >= 20, "only {checked} cases qualified");
