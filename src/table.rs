@@ -74,7 +74,10 @@ fn tblfm_md_re() -> &'static Regex {
 
 fn gfm_delimiter_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    re(&R, r"^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$")
+    re(
+        &R,
+        r"^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$",
+    )
 }
 
 pub fn is_table_line(line: &str) -> bool {
@@ -139,7 +142,12 @@ fn md_html_block_start(line: &str) -> Option<Option<&'static str>> {
     }
     let lower = rest.to_ascii_lowercase();
     let mut end: Option<&'static str> = None;
-    for (tag, close) in [("script", "</script>"), ("pre", "</pre>"), ("style", "</style>"), ("textarea", "</textarea>")] {
+    for (tag, close) in [
+        ("script", "</script>"),
+        ("pre", "</pre>"),
+        ("style", "</style>"),
+        ("textarea", "</textarea>"),
+    ] {
         if let Some(after) = lower.strip_prefix('<').and_then(|r| r.strip_prefix(tag)) {
             if after.is_empty() || after.starts_with([' ', '\t', '>']) {
                 end = Some(close);
@@ -151,10 +159,18 @@ fn md_html_block_start(line: &str) -> Option<Option<&'static str>> {
         None if rest.starts_with("<!--") => ("-->", 4),
         None if rest.starts_with("<?") => ("?>", 2),
         None if rest.starts_with("<![CDATA[") => ("]]>", 9),
-        None if rest.starts_with("<!") && rest[2..].starts_with(|c: char| c.is_ascii_alphabetic()) => (">", 2),
+        None if rest.starts_with("<!")
+            && rest[2..].starts_with(|c: char| c.is_ascii_alphabetic()) =>
+        {
+            (">", 2)
+        }
         None => return None,
     };
-    Some(if lower[from..].contains(end) { None } else { Some(end) })
+    Some(if lower[from..].contains(end) {
+        None
+    } else {
+        Some(end)
+    })
 }
 
 /// A Markdown block-quote line: the text after its `>` markers.
@@ -177,18 +193,27 @@ fn has_unescaped_pipe(line: &str) -> bool {
 }
 
 fn org_block_start(line: &str) -> bool {
-    line.trim_start_matches([' ', '\t']).to_ascii_lowercase().starts_with("#+begin_")
+    line.trim_start_matches([' ', '\t'])
+        .to_ascii_lowercase()
+        .starts_with("#+begin_")
 }
 
 fn org_block_end(line: &str) -> bool {
-    line.trim_start_matches([' ', '\t']).to_ascii_lowercase().starts_with("#+end_")
+    line.trim_start_matches([' ', '\t'])
+        .to_ascii_lowercase()
+        .starts_with("#+end_")
 }
 
 /// The formula lines under a table that ends before line `end`. Org: the
 /// `#+TBLFM:` line directly under the table (Org 9.8.7 does not read one
 /// after a blank line). Markdown: `<!-- TBLFM: ... -->` lines, after any
 /// blank lines (`unquote` strips a block-quote prefix first).
-fn formula_lines(lines: &[&str], end: usize, dialect: Dialect, unquote: bool) -> (Option<String>, bool) {
+fn formula_lines(
+    lines: &[&str],
+    end: usize,
+    dialect: Dialect,
+    unquote: bool,
+) -> (Option<String>, bool) {
     let get = |k: usize| -> Option<&str> {
         let l = *lines.get(k)?;
         if unquote {
@@ -230,7 +255,9 @@ fn formula_lines(lines: &[&str], end: usize, dialect: Dialect, unquote: bool) ->
 fn md_table_problem(lines: &[&str], start: usize, end: usize) -> Option<String> {
     let run = &lines[start..end];
     if run.iter().any(|l| indent_of(l).0 > 3) {
-        return Some("a table line is indented by four or more spaces (Markdown reads it as code)".into());
+        return Some(
+            "a table line is indented by four or more spaces (Markdown reads it as code)".into(),
+        );
     }
     let header = split_row(run[0], Dialect::Markdown);
     let valid_delim = run.len() >= 2
@@ -242,8 +269,13 @@ fn md_table_problem(lines: &[&str], start: usize, end: usize) -> Option<String> 
                 .into(),
         );
     }
-    if run[2..].iter().any(|l| split_row(l, Dialect::Markdown).len() > header.len()) {
-        return Some("a row has more cells than the header (Markdown ignores the extra cells)".into());
+    if run[2..]
+        .iter()
+        .any(|l| split_row(l, Dialect::Markdown).len() > header.len())
+    {
+        return Some(
+            "a row has more cells than the header (Markdown ignores the extra cells)".into(),
+        );
     }
     let one_line_comment = |l: &str| {
         let (ind, rest) = indent_of(l);
@@ -262,7 +294,10 @@ fn md_table_problem(lines: &[&str], start: usize, end: usize) -> Option<String> 
         }
         let (ind, rest) = indent_of(lines[k]);
         if ind <= 3 && rest.starts_with('<') {
-            return Some("the table follows an HTML line without a blank line; Markdown may read it as HTML".into());
+            return Some(
+                "the table follows an HTML line without a blank line; Markdown may read it as HTML"
+                    .into(),
+            );
         }
     }
     None
@@ -322,7 +357,9 @@ pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
                 }
                 if md_unquote(line).is_some_and(|r| r.starts_with('|')) {
                     let start = i;
-                    while i < lines.len() && md_unquote(lines[i]).is_some_and(|r| r.starts_with('|')) {
+                    while i < lines.len()
+                        && md_unquote(lines[i]).is_some_and(|r| r.starts_with('|'))
+                    {
                         i += 1;
                     }
                     let (tblfm, md_has_org_tblfm) = formula_lines(lines, i, dialect, true);
@@ -351,7 +388,13 @@ pub fn find_tables(lines: &[&str], dialect: Dialect) -> Vec<Found> {
             Dialect::Markdown => md_table_problem(lines, start, end),
             Dialect::Org => None,
         };
-        out.push(Found { start, end, tblfm, md_has_org_tblfm, decline });
+        out.push(Found {
+            start,
+            end,
+            tblfm,
+            md_has_org_tblfm,
+            decline,
+        });
     }
     if let Some(why) = block_uncertainty(lines, dialect) {
         for f in out.iter_mut().filter(|f| f.decline.is_none()) {
@@ -408,7 +451,10 @@ fn block_uncertainty(lines: &[&str], dialect: Dialect) -> Option<String> {
         }
         if dialect == Dialect::Markdown && !tblfm_md_re().is_match(line) {
             let mut c = r.chars();
-            if c.next() == Some('<') && c.next().is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) {
+            if c.next() == Some('<')
+                && c.next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'))
+            {
                 return Some(format!(
                     "line {} of the block is HTML; the plugin cannot tell whether Tine shows the table as a table or as HTML",
                     n + 1
@@ -424,7 +470,9 @@ fn block_uncertainty(lines: &[&str], dialect: Dialect) -> Option<String> {
 /// non-empty text without a closing `|` is a field too.
 pub fn split_row(line: &str, dialect: Dialect) -> Vec<String> {
     let t = line.trim_start_matches([' ', '\t']);
-    let Some(rest) = t.strip_prefix('|') else { return Vec::new() };
+    let Some(rest) = t.strip_prefix('|') else {
+        return Vec::new();
+    };
     let chars: Vec<char> = rest.chars().collect();
     let mut fields = Vec::new();
     let mut i = 0;
@@ -486,14 +534,24 @@ pub fn parse_table(lines: &[&str], dialect: Dialect) -> Table {
             // `|-5|` or `|---|` (review finding F2).
             Dialect::Markdown if n == 1 && gfm_delimiter_re().is_match(l) => {
                 out.push(Line::Hline);
-                md_delimiter = Some(split_row(l, dialect).iter().map(|c| md_align_of(c)).collect());
+                md_delimiter = Some(
+                    split_row(l, dialect)
+                        .iter()
+                        .map(|c| md_align_of(c))
+                        .collect(),
+                );
                 continue;
             }
             _ => {}
         }
         out.push(Line::Data(split_row(l, dialect)));
     }
-    Table { lines: out, indent, md_delimiter, dialect }
+    Table {
+        lines: out,
+        indent,
+        md_delimiter,
+        dialect,
+    }
 }
 
 fn org_link_re() -> &'static Regex {
@@ -507,7 +565,9 @@ fn cell_width(cell: &str, dialect: Dialect) -> usize {
         Dialect::Markdown => UnicodeWidthStr::width(cell),
         Dialect::Org => {
             let shown = org_link_re().replace_all(cell, |c: &regex::Captures| {
-                c.get(2).or(c.get(1)).map_or(String::new(), |m| m.as_str().to_string())
+                c.get(2)
+                    .or(c.get(1))
+                    .map_or(String::new(), |m| m.as_str().to_string())
             });
             UnicodeWidthStr::width(shown.as_ref())
         }
@@ -556,7 +616,9 @@ impl Table {
                 }
             }
         }
-        let per_line = widths.iter().fold(self.indent.len() + 1, |a, w| a.saturating_add(w + 3));
+        let per_line = widths
+            .iter()
+            .fold(self.indent.len() + 1, |a, w| a.saturating_add(w + 3));
         if per_line.saturating_mul(self.lines.len()) > limit.saturating_mul(2) {
             return None;
         }
@@ -614,8 +676,11 @@ impl Table {
                 widths[c] = widths[c].max(colons + 1);
             }
         }
-        let rule: String =
-            widths.iter().map(|w| "-".repeat(w + 2)).collect::<Vec<_>>().join("+");
+        let rule: String = widths
+            .iter()
+            .map(|w| "-".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("+");
         let mut out = Vec::new();
         for (n, l) in self.lines.iter().enumerate() {
             match l {
@@ -671,8 +736,14 @@ mod tests {
         assert_eq!(split_row("| a | b", Dialect::Org), vec!["a", "b"]);
         assert_eq!(split_row("| a |  |", Dialect::Org), vec!["a", ""]);
         assert_eq!(split_row("|", Dialect::Org), Vec::<String>::new());
-        assert_eq!(split_row("| a \\| b | c |", Dialect::Markdown), vec!["a \\| b", "c"]);
-        assert_eq!(split_row("| a \\| b | c |", Dialect::Org), vec!["a \\", "b", "c"]);
+        assert_eq!(
+            split_row("| a \\| b | c |", Dialect::Markdown),
+            vec!["a \\| b", "c"]
+        );
+        assert_eq!(
+            split_row("| a \\| b | c |", Dialect::Org),
+            vec!["a \\", "b", "c"]
+        );
     }
 
     #[test]
@@ -681,7 +752,12 @@ mod tests {
         let t = parse_table(&src, Dialect::Org);
         assert_eq!(
             t.render(),
-            vec!["| a   |  1 |", "|-----+----|", "| bcd | 22 |", "|     |  x |"]
+            vec![
+                "| a   |  1 |",
+                "|-----+----|",
+                "| bcd | 22 |",
+                "|     |  x |"
+            ]
         );
     }
 
@@ -689,15 +765,30 @@ mod tests {
     fn markdown_delimiter_row_stays_gfm() {
         let src = ["| a | b |", "|:-|--:|", "| 1 | 2 |"];
         let t = parse_table(&src, Dialect::Markdown);
-        assert_eq!(t.render(), vec!["| a  |  b |", "| :- | -: |", "| 1  |  2 |"]);
+        assert_eq!(
+            t.render(),
+            vec!["| a  |  b |", "| :- | -: |", "| 1  |  2 |"]
+        );
         let src2 = ["| x | y |", "| --- | --- |", "| 10 | abc |"];
         let t2 = parse_table(&src2, Dialect::Markdown);
-        assert_eq!(t2.render(), vec!["|  x | y   |", "| -- | --- |", "| 10 | abc |"]);
+        assert_eq!(
+            t2.render(),
+            vec!["|  x | y   |", "| -- | --- |", "| 10 | abc |"]
+        );
     }
 
     #[test]
     fn finds_tables_and_formula_lines() {
-        let md = ["text", "| a |", "| 1 |", "<!-- TBLFM: $1=2 -->", "<!-- TBLFM: @1$1=3 -->", "```", "| x |", "```"];
+        let md = [
+            "text",
+            "| a |",
+            "| 1 |",
+            "<!-- TBLFM: $1=2 -->",
+            "<!-- TBLFM: @1$1=3 -->",
+            "```",
+            "| x |",
+            "```",
+        ];
         let f = find_tables(&md, Dialect::Markdown);
         assert_eq!(f.len(), 1);
         assert_eq!((f[0].start, f[0].end), (1, 3));

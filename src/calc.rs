@@ -42,7 +42,10 @@ fn int_budget(x: BigInt) -> CResult<BigInt> {
 pub enum Num {
     Int(BigInt),
     /// mantissa * 10^exp, normalised: no trailing zeros, at most `prec` digits.
-    Float { m: BigInt, e: i64 },
+    Float {
+        m: BigInt,
+        e: i64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,7 +98,11 @@ pub struct Modes {
 impl Default for Modes {
     /// `org-calc-default-modes`: internal precision 12, float format (float 8).
     fn default() -> Self {
-        Modes { prec: 12, kind: FloatKind::Float, figs: 8 }
+        Modes {
+            prec: 12,
+            kind: FloatKind::Float,
+            figs: 8,
+        }
     }
 }
 
@@ -123,7 +130,11 @@ fn scale_rounding(a: &BigInt, n: i64) -> BigInt {
     if a.is_negative() {
         return -scale_rounding(&-a, n);
     }
-    let shifted = if n == -1 { a.clone() } else { a / pow10(-1 - n) };
+    let shifted = if n == -1 {
+        a.clone()
+    } else {
+        a / pow10(-1 - n)
+    };
     (shifted + BigInt::from(5)) / BigInt::from(10)
 }
 
@@ -184,10 +195,18 @@ pub fn add(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
         return Ok(Num::Int(int_budget(x + y)?));
     }
     if is_zero(a) {
-        return if is_float(a) && !is_float(b) { float_of(b, prec) } else { Ok(b.clone()) };
+        return if is_float(a) && !is_float(b) {
+            float_of(b, prec)
+        } else {
+            Ok(b.clone())
+        };
     }
     if is_zero(b) {
-        return if is_float(b) && !is_float(a) { float_of(a, prec) } else { Ok(a.clone()) };
+        return if is_float(b) && !is_float(a) {
+            float_of(a, prec)
+        } else {
+            Ok(a.clone())
+        };
     }
     let (ma, ea) = to_float(a, prec)?;
     let (mb, eb) = to_float(b, prec)?;
@@ -225,10 +244,18 @@ pub fn mul(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
         return Ok(Num::Int(int_budget(x * y)?));
     }
     if is_zero(a) {
-        return if is_float(b) && !is_float(a) { float_of(a, prec) } else { Ok(a.clone()) };
+        return if is_float(b) && !is_float(a) {
+            float_of(a, prec)
+        } else {
+            Ok(a.clone())
+        };
     }
     if is_zero(b) {
-        return if is_float(a) && !is_float(b) { float_of(b, prec) } else { Ok(b.clone()) };
+        return if is_float(a) && !is_float(b) {
+            float_of(b, prec)
+        } else {
+            Ok(b.clone())
+        };
     }
     let (ma, ea) = to_float(a, prec)?;
     let (mb, eb) = to_float(b, prec)?;
@@ -246,7 +273,11 @@ pub fn div(a: &Num, b: &Num, prec: i64) -> CResult<Num> {
         return unsupported("division by zero (Calc leaves it unevaluated)");
     }
     if is_zero(a) {
-        return if is_float(b) && !is_float(a) { float_of(a, prec) } else { Ok(a.clone()) };
+        return if is_float(b) && !is_float(a) {
+            float_of(a, prec)
+        } else {
+            Ok(a.clone())
+        };
     }
     if let (Num::Int(x), Num::Int(y)) = (a, b) {
         let q = x / y;
@@ -314,7 +345,10 @@ pub fn read_number(s: &str, prec: i64) -> CResult<Num> {
             return calc_error("bad number");
         }
     } else if mant.bytes().all(|c| c.is_ascii_digit()) {
-        Num::Int(mant.parse::<BigInt>().map_err(|_| Outcome::CalcError("bad number".into()))?)
+        Num::Int(
+            mant.parse::<BigInt>()
+                .map_err(|_| Outcome::CalcError("bad number".into()))?,
+        )
     } else if let Some((int, frac)) = mant.split_once('.') {
         if frac.contains('.') || (int.is_empty() && frac.is_empty()) {
             return calc_error("bad number format");
@@ -323,8 +357,12 @@ pub fn read_number(s: &str, prec: i64) -> CResult<Num> {
             return calc_error("bad number format");
         }
         let digits = format!("{int}{frac}");
-        let m = if digits.is_empty() { BigInt::zero() } else {
-            digits.parse::<BigInt>().map_err(|_| Outcome::CalcError("bad number".into()))?
+        let m = if digits.is_empty() {
+            BigInt::zero()
+        } else {
+            digits
+                .parse::<BigInt>()
+                .map_err(|_| Outcome::CalcError("bad number".into()))?
         };
         make_float(m, -(frac.len() as i64), prec)?
     } else {
@@ -334,7 +372,9 @@ pub fn read_number(s: &str, prec: i64) -> CResult<Num> {
         None => Ok(base),
         Some(x) => {
             let x = x.replace('_', "-");
-            let n: i64 = x.parse().map_err(|_| Outcome::CalcError("bad exponent".into()))?;
+            let n: i64 = x
+                .parse()
+                .map_err(|_| Outcome::CalcError("bad exponent".into()))?;
             if n.abs() > MAX_EXP {
                 return unsupported("exponent too large");
             }
@@ -392,7 +432,11 @@ fn format_float_pos(m: &BigInt, e: i64, modes: &Modes) -> String {
         }
     } else {
         let eadj = e + len;
-        let scale: i64 = if kind == FloatKind::Eng { 1 + (eadj + 300002).rem_euclid(3) } else { 1 };
+        let scale: i64 = if kind == FloatKind::Eng {
+            1 + (eadj + 300002).rem_euclid(3)
+        } else {
+            1
+        };
         let mut s = s;
         if scale > s.len() as i64 {
             s.push_str(&"0".repeat((scale - s.len() as i64) as usize));
@@ -529,8 +573,8 @@ fn tokenize(src: &str) -> CResult<Vec<Tok>> {
         }
         // Multi-character punctuation that Calc reads as one token.
         const MULTI: &[&str] = &[
-            "~=", "<=", ">=", "<>", "/=", "+/-", "\\dots", "\\ldots", "**", "<<", ">>", "==", "!=", "&&&",
-            "|||", "!!!", "&&", "||", "!!", ":=", "::", "=>",
+            "~=", "<=", ">=", "<>", "/=", "+/-", "\\dots", "\\ldots", "**", "<<", ">>", "==", "!=",
+            "&&&", "|||", "!!!", "&&", "||", "!!", ":=", "::", "=>",
         ];
         let rest: String = s[i..s.len().min(i + 7)].iter().collect();
         if let Some(m) = MULTI.iter().find(|m| rest.starts_with(**m)) {
@@ -595,8 +639,30 @@ fn binary_op(t: &Tok) -> Option<(&'static str, i32, i32)> {
 fn is_foreign_operator(p: &str) -> bool {
     matches!(
         p,
-        "%" | "\\" | "|" | "_" | "!" | "!!" | "?" | ":=" | "::" | "=>" | "&&&" | "|||" | "!!!" | "<>" | "~="
-            | "/=" | "<<" | ">>" | "+/-" | ":" | ";" | "@" | "'" | "{" | "}"
+        "%" | "\\"
+            | "|"
+            | "_"
+            | "!"
+            | "!!"
+            | "?"
+            | ":="
+            | "::"
+            | "=>"
+            | "&&&"
+            | "|||"
+            | "!!!"
+            | "<>"
+            | "~="
+            | "/="
+            | "<<"
+            | ">>"
+            | "+/-"
+            | ":"
+            | ";"
+            | "@"
+            | "'"
+            | "{"
+            | "}"
     )
 }
 
@@ -660,7 +726,9 @@ impl Parser {
             let t = self.peek().clone();
             let (op, lp, rp, implicit) = if let Some((op, lp, rp)) = binary_op(&t) {
                 (op, lp, rp, false)
-            } else if matches!(t, Tok::Num(_) | Tok::Sym(_)) || matches!(&t, Tok::Punc(p) if p == "(" || p == "[") {
+            } else if matches!(t, Tok::Num(_) | Tok::Sym(_))
+                || matches!(&t, Tok::Punc(p) if p == "(" || p == "[")
+            {
                 ("*", 196, 195, true)
             } else {
                 if let Tok::Punc(p) = &t {
@@ -769,7 +837,9 @@ impl Parser {
                         _ => false,
                     };
                     if !comma && !items.iter().all(plain) {
-                        return unsupported("a vector without commas (Calc separates its elements by spaces)");
+                        return unsupported(
+                            "a vector without commas (Calc separates its elements by spaces)",
+                        );
                     }
                     Ok((Expr::Vec(items), d + 1))
                 }
@@ -783,7 +853,11 @@ impl Parser {
 
 pub fn parse(src: &str) -> CResult<Expr> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks, pos: 0, depth: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.expr(0)?;
     match p.peek() {
         Tok::End => Ok(e),
@@ -810,14 +884,13 @@ fn neg_value(v: &Value) -> CResult<Value> {
 fn add_values(a: &Value, b: &Value, prec: i64) -> CResult<Value> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => Ok(Value::Num(add(x, y, prec)?)),
-        (Value::Nan, Value::Num(_) | Value::Nan | Value::Inf(_)) | (Value::Num(_) | Value::Inf(_), Value::Nan) => {
-            Ok(Value::Nan)
-        }
+        (Value::Nan, Value::Num(_) | Value::Nan | Value::Inf(_))
+        | (Value::Num(_) | Value::Inf(_), Value::Nan) => Ok(Value::Nan),
         (Value::Inf(s), Value::Num(_)) | (Value::Num(_), Value::Inf(s)) => Ok(Value::Inf(*s)),
         (Value::Inf(s), Value::Inf(t)) if s == t && *s != 0 => Ok(Value::Inf(*s)),
-        (Value::Sym(s), _) | (_, Value::Sym(s)) => {
-            unsupported(format!("symbolic value `{s}` (Calc would keep the sum as algebra)"))
-        }
+        (Value::Sym(s), _) | (_, Value::Sym(s)) => unsupported(format!(
+            "symbolic value `{s}` (Calc would keep the sum as algebra)"
+        )),
         _ => unsupported("adding these values"),
     }
 }
@@ -836,7 +909,9 @@ fn truth(v: &Value) -> CResult<bool> {
 fn flatten(v: &Value, out: &mut Vec<Value>) {
     match v {
         Value::Vec(items) => items.iter().for_each(|i| flatten(i, out)),
-        Value::Str(s) => s.chars().for_each(|c| out.push(Value::Num(Num::Int(BigInt::from(c as u32))))),
+        Value::Str(s) => s
+            .chars()
+            .for_each(|c| out.push(Value::Num(Num::Int(BigInt::from(c as u32))))),
         other => out.push(other.clone()),
     }
 }
@@ -867,10 +942,16 @@ impl Eval {
                 }
                 Ok(Value::Sym(name.clone()))
             }
-            Expr::Vec(items) => Ok(Value::Vec(items.iter().map(|i| self.eval(i)).collect::<CResult<_>>()?)),
+            Expr::Vec(items) => Ok(Value::Vec(
+                items.iter().map(|i| self.eval(i)).collect::<CResult<_>>()?,
+            )),
             Expr::Neg(x) => neg_value(&self.eval(x)?),
             Expr::Not(x) => match self.eval(x)? {
-                Value::Num(n) => Ok(Value::Num(Num::Int(if is_zero(&n) { BigInt::one() } else { BigInt::zero() }))),
+                Value::Num(n) => Ok(Value::Num(Num::Int(if is_zero(&n) {
+                    BigInt::one()
+                } else {
+                    BigInt::zero()
+                }))),
                 _ => unsupported("`!` of a non-number"),
             },
             Expr::Bin(op, a, b) => self.binary(op, a, b),
@@ -881,9 +962,9 @@ impl Eval {
     fn num_pair(&self, a: Value, b: Value, op: &str) -> CResult<(Num, Num)> {
         match (a, b) {
             (Value::Num(x), Value::Num(y)) => Ok((x, y)),
-            (Value::Sym(s), _) | (_, Value::Sym(s)) => {
-                unsupported(format!("symbolic value `{s}` (Calc would keep `{op}` as algebra)"))
-            }
+            (Value::Sym(s), _) | (_, Value::Sym(s)) => unsupported(format!(
+                "symbolic value `{s}` (Calc would keep `{op}` as algebra)"
+            )),
             _ => unsupported(format!("`{op}` on a non-number")),
         }
     }
@@ -897,7 +978,11 @@ impl Eval {
                 return unsupported(format!("`{op}` on a non-number"));
             };
             return Ok(Value::Num(if op == "&&" {
-                if is_zero(xn) { xn.clone() } else { yn.clone() }
+                if is_zero(xn) {
+                    xn.clone()
+                } else {
+                    yn.clone()
+                }
             } else if is_zero(xn) {
                 yn.clone()
             } else {
@@ -907,7 +992,8 @@ impl Eval {
         let x = self.eval(a)?;
         let y = self.eval(b)?;
         if COMPARISONS.contains(&op) {
-            let bool_val = |t: bool| Value::Num(Num::Int(if t { BigInt::one() } else { BigInt::zero() }));
+            let bool_val =
+                |t: bool| Value::Num(Num::Int(if t { BigInt::one() } else { BigInt::zero() }));
             if let (Value::Str(s), Value::Str(t)) = (&x, &y) {
                 return match op {
                     "==" => Ok(bool_val(s == t)),
@@ -945,7 +1031,9 @@ impl Eval {
                 (Num::Int(b), Num::Int(n)) if !n.is_negative() && !(b.is_zero() && n.is_zero()) => {
                     Num::Int(pow_int(b, n)?)
                 }
-                _ => return unsupported("`^` other than an integer to a non-negative integer power"),
+                _ => {
+                    return unsupported("`^` other than an integer to a non-negative integer power")
+                }
             },
             _ => return unsupported(format!("operator `{op}`")),
         }))
@@ -960,15 +1048,23 @@ impl Eval {
             acc = Some(match (acc, it) {
                 (None, v @ (Value::Num(_) | Value::Nan | Value::Inf(_))) => v,
                 (Some(a), b) if add_not_mul => add_values(&a, &b, inner)?,
-                (Some(Value::Num(a)), Value::Num(b)) => {
-                    Value::Num(if add_not_mul { add(&a, &b, inner)? } else { mul(&a, &b, inner)? })
+                (Some(Value::Num(a)), Value::Num(b)) => Value::Num(if add_not_mul {
+                    add(&a, &b, inner)?
+                } else {
+                    mul(&a, &b, inner)?
+                }),
+                (_, Value::Sym(s)) => {
+                    return unsupported(format!("symbolic value `{s}` in a vector"))
                 }
-                (_, Value::Sym(s)) => return unsupported(format!("symbolic value `{s}` in a vector")),
                 _ => return unsupported("a vector element that is not a number"),
             });
         }
         match acc {
-            None => Ok(Value::Num(Num::Int(if add_not_mul { BigInt::zero() } else { BigInt::one() }))),
+            None => Ok(Value::Num(Num::Int(if add_not_mul {
+                BigInt::zero()
+            } else {
+                BigInt::one()
+            }))),
             Some(Value::Num(n)) => Ok(Value::Num(renormalize(n, self.prec())?)),
             Some(v) => Ok(v),
         }
@@ -980,9 +1076,16 @@ impl Eval {
                 return unsupported("`if` without exactly three arguments");
             }
             let c = self.eval(&args[0])?;
-            return if truth(&c)? { self.eval(&args[1]) } else { self.eval(&args[2]) };
+            return if truth(&c)? {
+                self.eval(&args[1])
+            } else {
+                self.eval(&args[2])
+            };
         }
-        let vals = args.iter().map(|a| self.eval(a)).collect::<CResult<Vec<_>>>()?;
+        let vals = args
+            .iter()
+            .map(|a| self.eval(a))
+            .collect::<CResult<Vec<_>>>()?;
         match name {
             "vsum" => self.reduce(&vals, true),
             "vprod" => self.reduce(&vals, false),
@@ -1003,7 +1106,9 @@ impl Eval {
                         Some(s) => add(&s, n, inner)?,
                     });
                 }
-                let Some(sum) = sum else { return unsupported("`vmean` of an empty vector") };
+                let Some(sum) = sum else {
+                    return unsupported("`vmean` of an empty vector");
+                };
                 let q = div(&sum, &Num::Int(BigInt::from(items.len())), inner)?;
                 Ok(Value::Num(renormalize(q, self.prec())?))
             }
@@ -1011,7 +1116,9 @@ impl Eval {
                 let mut items = Vec::new();
                 vals.iter().for_each(|a| flatten(a, &mut items));
                 if items.is_empty() {
-                    return unsupported(format!("`{name}` of an empty vector (Calc gives an infinity)"));
+                    return unsupported(format!(
+                        "`{name}` of an empty vector (Calc gives an infinity)"
+                    ));
                 }
                 let mut best: Option<Num> = None;
                 for it in &items {
@@ -1022,8 +1129,16 @@ impl Eval {
                         None => n.clone(),
                         Some(b) => {
                             let ord = compare(n, &b);
-                            let better = if name == "vmax" { ord == Ordering::Greater } else { ord == Ordering::Less };
-                            if better { n.clone() } else { b }
+                            let better = if name == "vmax" {
+                                ord == Ordering::Greater
+                            } else {
+                                ord == Ordering::Less
+                            };
+                            if better {
+                                n.clone()
+                            } else {
+                                b
+                            }
                         }
                     });
                 }
@@ -1049,7 +1164,9 @@ impl Eval {
                 match &vals[0] {
                     Value::Vec(items) => Ok(Value::Num(Num::Int(BigInt::from(items.len())))),
                     Value::Str(s) => Ok(Value::Num(Num::Int(BigInt::from(s.chars().count())))),
-                    Value::Num(_) | Value::Nan | Value::Inf(_) => Ok(Value::Num(Num::Int(BigInt::zero()))),
+                    Value::Num(_) | Value::Nan | Value::Inf(_) => {
+                        Ok(Value::Num(Num::Int(BigInt::zero())))
+                    }
                     _ => unsupported("`vlen` of a symbolic value"),
                 }
             }
@@ -1136,10 +1253,18 @@ mod tests {
 
     #[test]
     fn fix_format_follows_calc() {
-        let m = Modes { kind: FloatKind::Fix, figs: -1, ..Modes::default() };
+        let m = Modes {
+            kind: FloatKind::Fix,
+            figs: -1,
+            ..Modes::default()
+        };
         assert_eq!(calc_eval("96+.0", m, false).unwrap(), "96.0");
         assert_eq!(calc_eval("4.1+8.2", m, false).unwrap(), "12.3");
-        let m2 = Modes { kind: FloatKind::Fix, figs: 2, ..Modes::default() };
+        let m2 = Modes {
+            kind: FloatKind::Fix,
+            figs: 2,
+            ..Modes::default()
+        };
         assert_eq!(calc_eval("(1)/(3)", m2, false).unwrap(), "0.33");
         assert_eq!(calc_eval("(2)*(3)", m2, false).unwrap(), "6");
         assert_eq!(calc_eval("0.0001", m2, false).unwrap(), "1e-4");

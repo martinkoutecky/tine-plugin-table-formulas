@@ -21,7 +21,8 @@ use tine_plugin_table_formulas::{process_text, Laps};
 
 fn load(name: &str) -> Value {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-    serde_json::from_str(&std::fs::read_to_string(&path).expect("fixture file")).expect("fixture json")
+    serde_json::from_str(&std::fs::read_to_string(&path).expect("fixture file"))
+        .expect("fixture json")
 }
 
 fn laps_of(v: &Value) -> Laps {
@@ -47,7 +48,12 @@ fn data_rows(text: &str) -> Vec<Vec<String>> {
 fn no_wrong_writes(input: &str, out: &str, expected: &str) -> Result<(), String> {
     let (i, o, e) = (data_rows(input), data_rows(out), data_rows(expected));
     if i.len() != o.len() || o.len() != e.len() {
-        return Err(format!("row counts differ: input {}, out {}, expected {}", i.len(), o.len(), e.len()));
+        return Err(format!(
+            "row counts differ: input {}, out {}, expected {}",
+            i.len(),
+            o.len(),
+            e.len()
+        ));
     }
     for r in 0..o.len() {
         let width = o[r].len().max(e[r].len()).max(i[r].len());
@@ -55,7 +61,11 @@ fn no_wrong_writes(input: &str, out: &str, expected: &str) -> Result<(), String>
             let get = |v: &Vec<String>| v.get(c).cloned().unwrap_or_default();
             let (iv, ov, ev) = (get(&i[r]), get(&o[r]), get(&e[r]));
             if ov != ev && ov != iv {
-                return Err(format!("row {} col {}: wrote `{ov}`, Org has `{ev}` (was `{iv}`)", r + 1, c + 1));
+                return Err(format!(
+                    "row {} col {}: wrote `{ov}`, Org has `{ev}` (was `{iv}`)",
+                    r + 1,
+                    c + 1
+                ));
             }
         }
     }
@@ -67,7 +77,13 @@ fn org_mode_corpus() {
     let expectations = load("expectations.json");
     let mut cases: Vec<Value> = Vec::new();
     let mut revisions = Vec::new();
-    for file in ["org-table-tests.json", "org-table-tests-manual.json", "emacs-oracle.json", "emacs-oracle-r1.json", "emacs-oracle-r2.json"] {
+    for file in [
+        "org-table-tests.json",
+        "org-table-tests-manual.json",
+        "emacs-oracle.json",
+        "emacs-oracle-r1.json",
+        "emacs-oracle-r2.json",
+    ] {
         let v = load(file);
         revisions.push(v["revision"].as_str().unwrap_or("?").to_string());
         cases.extend(v["cases"].as_array().cloned().unwrap_or_default());
@@ -82,14 +98,24 @@ fn org_mode_corpus() {
         let result = process_text(input, Dialect::Org, laps_of(&case["laps"]));
         match (status, result) {
             ("abort", Err(_)) => aborted += 1,
-            ("declined", Err(a)) => failures.push(format!("{id}: listed as declined, but the plugin aborted: {a:?}")),
-            ("abort", Ok((out, _))) => failures.push(format!("{id}: Org aborts, the plugin wrote\n{out}")),
+            ("declined", Err(a)) => failures.push(format!(
+                "{id}: listed as declined, but the plugin aborted: {a:?}"
+            )),
+            ("abort", Ok((out, _))) => {
+                failures.push(format!("{id}: Org aborts, the plugin wrote\n{out}"))
+            }
             (_, Err(a)) => failures.push(format!("{id}: unexpected abort {a:?}")),
             (status, Ok((out, report))) => {
-                let exact = match (case.get("expected"), case.get("expected_contains"), case.get("expected_regex")) {
+                let exact = match (
+                    case.get("expected"),
+                    case.get("expected_contains"),
+                    case.get("expected_regex"),
+                ) {
                     (Some(Value::String(e)), _, _) => out == *e,
                     (_, Some(Value::String(c)), _) => out.contains(c.as_str()),
-                    (_, _, Some(Value::String(r))) => regex::Regex::new(r).expect("fixture regex").is_match(&out),
+                    (_, _, Some(Value::String(r))) => {
+                        regex::Regex::new(r).expect("fixture regex").is_match(&out)
+                    }
                     _ => false,
                 };
                 if status == "match" {
@@ -98,13 +124,18 @@ fn org_mode_corpus() {
                     } else {
                         failures.push(format!(
                             "{id}: differs from Org\n--- got\n{out}\n--- Org\n{}",
-                            case["expected"].as_str().or(case["expected_contains"].as_str()).unwrap_or("")
+                            case["expected"]
+                                .as_str()
+                                .or(case["expected_contains"].as_str())
+                                .unwrap_or("")
                         ));
                     }
                     continue;
                 }
                 if exact {
-                    failures.push(format!("{id}: listed as declined but now matches Org; update expectations.json"));
+                    failures.push(format!(
+                        "{id}: listed as declined but now matches Org; update expectations.json"
+                    ));
                     continue;
                 }
                 if report.skipped.is_empty() {
@@ -112,7 +143,9 @@ fn org_mode_corpus() {
                     continue;
                 }
                 if out != input {
-                    failures.push(format!("{id}: declined, but the text changed\n--- got\n{out}\n--- input\n{input}"));
+                    failures.push(format!(
+                        "{id}: declined, but the text changed\n--- got\n{out}\n--- input\n{input}"
+                    ));
                     continue;
                 }
                 if let Some(Value::String(e)) = case.get("expected") {
@@ -122,7 +155,11 @@ fn org_mode_corpus() {
                     }
                 }
                 if std::env::var_os("TF_VERBOSE").is_some() {
-                    let why: Vec<String> = report.skipped.iter().map(|s| format!("{}: {}", s.formula, s.reason)).collect();
+                    let why: Vec<String> = report
+                        .skipped
+                        .iter()
+                        .map(|s| format!("{}: {}", s.formula, s.reason))
+                        .collect();
                     println!("DECLINED {id}\n    {}", why.join("\n    "));
                 }
                 declined += 1;
@@ -142,7 +179,12 @@ fn org_mode_corpus() {
         declined,
         aborted
     );
-    assert!(failures.is_empty(), "{} failure(s):\n\n{}", failures.len(), failures.join("\n\n"));
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }
 
 /// The Markdown form of the Emacs-oracle cases: a header row and a GFM
@@ -154,25 +196,50 @@ fn org_mode_corpus() {
 #[test]
 fn markdown_form_matches_org_cells() {
     let expectations = load("expectations.json");
-    let cases = load("emacs-oracle.json")["cases"].as_array().cloned().unwrap_or_default();
+    let cases = load("emacs-oracle.json")["cases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let mut checked = 0;
     let mut failures = Vec::new();
     for case in &cases {
         let id = case["id"].as_str().unwrap_or("?");
-        let (Some(input), Some(expected)) = (case["input"].as_str(), case["expected"].as_str()) else { continue };
+        let (Some(input), Some(expected)) = (case["input"].as_str(), case["expected"].as_str())
+        else {
+            continue;
+        };
         if expectations.get(id).is_some() {
             continue;
         }
         let (rows, tblfm): (Vec<&str>, Vec<&str>) =
             input.lines().partition(|l| l.trim_start().starts_with('|'));
-        let Some(formula) = tblfm.iter().find_map(|l| l.trim_start().strip_prefix("#+TBLFM:")) else { continue };
+        let Some(formula) = tblfm
+            .iter()
+            .find_map(|l| l.trim_start().strip_prefix("#+TBLFM:"))
+        else {
+            continue;
+        };
         if formula.contains('@') || rows.iter().any(|r| r.trim_start().starts_with("|-")) {
             continue;
         }
-        let ncol = rows.iter().map(|r| split_row(r, Dialect::Org).len()).max().unwrap_or(1);
-        let header = format!("|{}|", (1..=ncol).map(|i| format!(" h{i} ")).collect::<Vec<_>>().join("|"));
+        let ncol = rows
+            .iter()
+            .map(|r| split_row(r, Dialect::Org).len())
+            .max()
+            .unwrap_or(1);
+        let header = format!(
+            "|{}|",
+            (1..=ncol)
+                .map(|i| format!(" h{i} "))
+                .collect::<Vec<_>>()
+                .join("|")
+        );
         let delim = format!("|{}|", vec!["---"; ncol].join("|"));
-        let md = format!("{header}\n{delim}\n{}\n<!-- TBLFM: {} -->\n", rows.join("\n"), formula.trim());
+        let md = format!(
+            "{header}\n{delim}\n{}\n<!-- TBLFM: {} -->\n",
+            rows.join("\n"),
+            formula.trim()
+        );
         let (out, report) = match process_text(&md, Dialect::Markdown, Laps::Times(1)) {
             Ok(r) => r,
             Err(a) => {
@@ -184,17 +251,27 @@ fn markdown_form_matches_org_cells() {
             t.lines()
                 .filter(|l| l.trim_start().starts_with('|'))
                 .map(|l| split_row(l, Dialect::Markdown))
-                .filter(|r| !r.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':'))))
+                .filter(|r| {
+                    !r.iter()
+                        .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':')))
+                })
                 .collect()
         };
         let got: Vec<Vec<String>> = body(&out).into_iter().skip(1).collect();
         let want = body(expected);
         if got != want || !report.skipped.is_empty() {
-            failures.push(format!("{id}:\n--- markdown in\n{md}--- got\n{out}\n--- Org\n{expected}"));
+            failures.push(format!(
+                "{id}:\n--- markdown in\n{md}--- got\n{out}\n--- Org\n{expected}"
+            ));
         }
         checked += 1;
     }
     println!("markdown form: {checked} Emacs-oracle cases checked");
     assert!(checked >= 20, "only {checked} cases qualified");
-    assert!(failures.is_empty(), "{} failure(s):\n\n{}", failures.len(), failures.join("\n\n"));
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }

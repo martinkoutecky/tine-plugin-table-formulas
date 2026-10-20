@@ -21,7 +21,10 @@ pub struct Abort {
 }
 
 fn abort<T>(formula: Option<&str>, message: impl Into<String>) -> Result<T, Abort> {
-    Err(Abort { formula: formula.map(str::to_string), message: message.into() })
+    Err(Abort {
+        formula: formula.map(str::to_string),
+        message: message.into(),
+    })
 }
 
 /// A stored formula, `lhs=rhs` as written.
@@ -45,24 +48,35 @@ fn re(cell: &'static OnceLock<Regex>, pat: &str) -> &'static Regex {
 /// are ignored, as Org ignores them; a repeated left side is an error.
 pub fn parse_tblfm(s: &str) -> Result<Vec<Stored>, Abort> {
     static ENTRY: OnceLock<Regex> = OnceLock::new();
-    let entry = re(&ENTRY, r"^(@[-+I<>0-9.$@]+|\$([_a-zA-Z0-9]+|[<>]+)) *= *(.*[^ \t])");
+    let entry = re(
+        &ENTRY,
+        r"^(@[-+I<>0-9.$@]+|\$([_a-zA-Z0-9]+|[<>]+)) *= *(.*[^ \t])",
+    );
     static SEP: OnceLock<Regex> = OnceLock::new();
     let sep = re(&SEP, r" *:: *");
     let mut out: Vec<Stored> = Vec::new();
     for piece in sep.split(s) {
-        let Some(c) = entry.captures(piece) else { continue };
+        let Some(c) = entry.captures(piece) else {
+            continue;
+        };
         let mut lhs = c.get(1).map_or("", |m| m.as_str()).to_string();
         // `$name=` (not a column number or `$<`/`$>`) names a field; Org
         // stores it under the bare name.
         if let Some(name) = c.get(2) {
             let n = name.as_str();
-            if !(n.bytes().all(|b| b.is_ascii_digit()) || n.bytes().all(|b| b == b'<') || n.bytes().all(|b| b == b'>')) {
+            if !(n.bytes().all(|b| b.is_ascii_digit())
+                || n.bytes().all(|b| b == b'<')
+                || n.bytes().all(|b| b == b'>'))
+            {
                 lhs = n.to_string();
             }
         }
         let rhs = c.get(3).map_or("", |m| m.as_str()).to_string();
         if out.iter().any(|f| f.lhs == lhs) {
-            return abort(Some(&format!("{lhs}={rhs}")), format!("double definition `{lhs}=` in the formula line"));
+            return abort(
+                Some(&format!("{lhs}={rhs}")),
+                format!("double definition `{lhs}=` in the formula line"),
+            );
         }
         out.push(Stored { lhs, rhs });
     }
@@ -91,8 +105,15 @@ pub struct Report {
 
 impl Report {
     pub fn skip(&mut self, formula: &str, reason: &str) {
-        if !self.skipped.iter().any(|s| s.formula == formula && s.reason == reason) {
-            self.skipped.push(Skipped { formula: formula.to_string(), reason: reason.to_string() });
+        if !self
+            .skipped
+            .iter()
+            .any(|s| s.formula == formula && s.reason == reason)
+        {
+            self.skipped.push(Skipped {
+                formula: formula.to_string(),
+                reason: reason.to_string(),
+            });
         }
     }
     fn error(&mut self, formula: &str) {
@@ -147,7 +168,11 @@ pub const MAX_EXPANDED_FORMULA: usize = 256 * 1024;
 
 impl<'a> Engine<'a> {
     fn new(table: &'a mut Table) -> Result<Self, Abort> {
-        let mut types: Vec<bool> = table.lines.iter().map(|l| matches!(l, Line::Hline)).collect();
+        let mut types: Vec<bool> = table
+            .lines
+            .iter()
+            .map(|l| matches!(l, Line::Hline))
+            .collect();
         types.push(true);
         let dlines: Vec<usize> = table
             .lines
@@ -163,7 +188,13 @@ impl<'a> Engine<'a> {
             Line::Data(f) => f.len(),
             Line::Hline => 0,
         };
-        Ok(Engine { table, types, dlines, ncol, work: std::cell::Cell::new(0) })
+        Ok(Engine {
+            table,
+            types,
+            dlines,
+            ncol,
+            work: std::cell::Cell::new(0),
+        })
     }
 
     fn fields(&self, line: usize) -> &[String] {
@@ -177,7 +208,10 @@ impl<'a> Engine<'a> {
         if col < 1 {
             return String::new();
         }
-        self.fields(line).get(col as usize - 1).cloned().unwrap_or_default()
+        self.fields(line)
+            .get(col as usize - 1)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn is_dline(&self, line: usize) -> bool {
@@ -186,16 +220,30 @@ impl<'a> Engine<'a> {
 
     /// The 1-based data line number of a table line (Org's `@#`).
     fn dline_number(&self, line: usize) -> usize {
-        self.dlines.iter().position(|&l| l == line).map_or(0, |p| p + 1)
+        self.dlines
+            .iter()
+            .position(|&l| l == line)
+            .map_or(0, |p| p + 1)
     }
 
-    fn row_type(&self, want_hline: bool, n: usize, start: i64, backwards: bool, desc: &str, f: &str) -> Result<usize, Abort> {
+    fn row_type(
+        &self,
+        want_hline: bool,
+        n: usize,
+        start: i64,
+        backwards: bool,
+        desc: &str,
+        f: &str,
+    ) -> Result<usize, Abort> {
         let l = self.types.len() as i64;
         // A count that does not fit in i64 must not wrap (review round 2).
         if i64::try_from(n).map_or(true, |n| n >= l) {
             // Each step moves at least one line, so this count cannot stay
             // inside the table (and looping it would not end in time).
-            return abort(Some(f), format!("row descriptor {desc} leads outside the table"));
+            return abort(
+                Some(f),
+                format!("row descriptor {desc} leads outside the table"),
+            );
         }
         let mut i = start;
         for _ in 0..n {
@@ -207,7 +255,10 @@ impl<'a> Engine<'a> {
             }
         }
         if i < 0 || i >= l {
-            return abort(Some(f), format!("row descriptor {desc} leads outside the table"));
+            return abort(
+                Some(f),
+                format!("row descriptor {desc} leads outside the table"),
+            );
         }
         if i == l - 1 {
             return Ok((i - 1) as usize);
@@ -314,13 +365,17 @@ impl<'a> Engine<'a> {
             // Both ends sit on hlines with no data line between them. Org
             // 9.8.7 then reads fields outside the range (it gives 2 for
             // `vsum(@I$1..@I$2)` on `|1|2|`/hline/`|3|4|`); not reproduced.
-            return Ok(RangeVal::Decline(format!("the range {desc} has no data lines between its hlines")));
+            return Ok(RangeVal::Decline(format!(
+                "the range {desc} has no data lines between its hlines"
+            )));
         }
         let (lo, hi) = (first, last);
         let rows = (lo..=hi).filter(|&l| self.is_dline(l)).count();
         let area = rows.saturating_mul((lc - fc + 1) as usize);
         if area > MAX_RANGE_FIELDS {
-            return Ok(RangeVal::Decline(format!("the range {desc} covers more than {MAX_RANGE_FIELDS} fields")));
+            return Ok(RangeVal::Decline(format!(
+                "the range {desc} covers more than {MAX_RANGE_FIELDS} fields"
+            )));
         }
         if !self.charge(area) {
             return Ok(RangeVal::Decline(WORK_REASON.into()));
@@ -337,10 +392,20 @@ impl<'a> Engine<'a> {
         Ok(RangeVal::Many(out))
     }
 
-    fn range_corners(&self, desc: &str, thisline: usize, col: i64, f: &str) -> Result<(usize, i64, usize, i64, bool), Abort> {
+    fn range_corners(
+        &self,
+        desc: &str,
+        thisline: usize,
+        col: i64,
+        f: &str,
+    ) -> Result<(usize, i64, usize, i64, bool), Abort> {
         static COLS: OnceLock<Regex> = OnceLock::new();
         let cols = re(&COLS, r"^\$[0-9]+\.\.\$[0-9]+$");
-        let desc_owned = if cols.is_match(desc) { desc.replace('$', "@0$") } else { desc.to_string() };
+        let desc_owned = if cols.is_match(desc) {
+            desc.replace('$', "@0$")
+        } else {
+            desc.to_string()
+        };
         let c = range_re().captures(&desc_owned);
         let Some(c) = c else {
             return abort(Some(f), format!("invalid table range specifier `{desc}`"));
@@ -354,8 +419,10 @@ impl<'a> Engine<'a> {
         };
         let r1 = line_of(c.get(1))?;
         let r2 = line_of(c.get(4))?;
-        let unreadable =
-            || Abort { formula: Some(f.to_string()), message: format!("the column number in `{desc}` cannot be read exactly") };
+        let unreadable = || Abort {
+            formula: Some(f.to_string()),
+            message: format!("the column number in `{desc}` cannot be read exactly"),
+        };
         let c1 = Self::column_of(c.get(2).map(|m| m.as_str()), col).ok_or_else(unreadable)?;
         let c2 = Self::column_of(c.get(5).map(|m| m.as_str()), col).ok_or_else(unreadable)?;
         Ok((r1, c1, r2, c2, rangep))
@@ -419,11 +486,17 @@ fn handle_first_last(s: &str, nrows: usize, ncol: usize, f: &str) -> Result<Stri
         let marks = c.get(2).map_or("", |m| m.as_str());
         let nmax = if sigil == "@" { nrows } else { ncol } as i64;
         let len = marks.len() as i64;
-        let n = if marks.starts_with('<') { len } else { nmax - len + 1 };
+        let n = if marks.starts_with('<') {
+            len
+        } else {
+            nmax - len + 1
+        };
         if n < 1 || n > nmax {
             return abort(
                 Some(f),
-                format!("reference \"{sigil}{marks}\" in expression \"{s}\" points outside the table"),
+                format!(
+                    "reference \"{sigil}{marks}\" in expression \"{s}\" points outside the table"
+                ),
             );
         }
         let rep = format!("{sigil}{n}");
@@ -447,7 +520,13 @@ fn lisp_number_text(x: &str) -> Result<String, String> {
 }
 
 fn make_reference(v: &RangeVal, keep_empty: bool, numbers: bool) -> Result<String, String> {
-    let conv = |x: &str| if numbers { lisp_number_text(x) } else { Ok(x.to_string()) };
+    let conv = |x: &str| {
+        if numbers {
+            lisp_number_text(x)
+        } else {
+            Ok(x.to_string())
+        }
+    };
     let nonblank = |x: &str| x.chars().any(|c| !c.is_whitespace());
     Ok(match v {
         RangeVal::Decline(why) => return Err(why.clone()),
@@ -501,7 +580,10 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
             while let Some(c) = num.captures(&fmt) {
                 let letter = c.get(1).map_or("", |m| m.as_str());
                 let Some(n) = printf::small_int(c.get(2).map_or("0", |m| m.as_str())) else {
-                    return Err(format!("mode number `{}` cannot be read exactly", c.get(0).map_or("", |m| m.as_str())));
+                    return Err(format!(
+                        "mode number `{}` cannot be read exactly",
+                        c.get(0).map_or("", |m| m.as_str())
+                    ));
                 };
                 match letter {
                     "p" => {
@@ -510,10 +592,34 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
                         }
                         modes.prec = n;
                     }
-                    "n" => modes = Modes { kind: FloatKind::Float, figs: n, ..modes },
-                    "f" => modes = Modes { kind: FloatKind::Fix, figs: n, ..modes },
-                    "s" => modes = Modes { kind: FloatKind::Sci, figs: n, ..modes },
-                    _ => modes = Modes { kind: FloatKind::Eng, figs: n, ..modes },
+                    "n" => {
+                        modes = Modes {
+                            kind: FloatKind::Float,
+                            figs: n,
+                            ..modes
+                        }
+                    }
+                    "f" => {
+                        modes = Modes {
+                            kind: FloatKind::Fix,
+                            figs: n,
+                            ..modes
+                        }
+                    }
+                    "s" => {
+                        modes = Modes {
+                            kind: FloatKind::Sci,
+                            figs: n,
+                            ..modes
+                        }
+                    }
+                    _ => {
+                        modes = Modes {
+                            kind: FloatKind::Eng,
+                            figs: n,
+                            ..modes
+                        }
+                    }
                 }
                 if modes.figs.abs() > 200 {
                     return Err("a display precision above 200 digits".into());
@@ -525,7 +631,9 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
             let flag = re(&FLAG, r"[tTUNLEDRFSu]");
             while let Some(m) = flag.find(&fmt) {
                 match m.as_str() {
-                    "t" | "T" | "U" => return Err("durations (flags t, T, U) are not supported".into()),
+                    "t" | "T" | "U" => {
+                        return Err("durations (flags t, T, U) are not supported".into())
+                    }
                     "N" => numbers = true,
                     "E" => keep_empty = true,
                     "F" => return Err("fraction mode (flag F) is not supported".into()),
@@ -543,7 +651,13 @@ fn prepare(rhs: &str) -> Result<Prepared, String> {
             }
         }
     };
-    Ok(Prepared { expr, fmt, modes, numbers, keep_empty })
+    Ok(Prepared {
+        expr,
+        fmt,
+        modes,
+        numbers,
+        keep_empty,
+    })
 }
 
 impl<'a> Engine<'a> {
@@ -558,7 +672,9 @@ impl<'a> Engine<'a> {
         };
         static NAME: OnceLock<Regex> = OnceLock::new();
         if re(&NAME, r"\$[a-zA-Z_]").is_match(&p.expr) {
-            return Ok(EvalResult::Skip("named columns, parameters and constants are not supported".into()));
+            return Ok(EvalResult::Skip(
+                "named columns, parameters and constants are not supported".into(),
+            ));
         }
         let formula = handle_first_last(&p.expr, self.dlines.len(), self.ncol, f)?;
         let mut fields: Vec<String> = self.fields(line).to_vec();
@@ -573,23 +689,34 @@ impl<'a> Engine<'a> {
             }
         }
         if formula.len() > 2 && formula.starts_with("'(") {
-            return Ok(EvalResult::Skip("Emacs Lisp formula (kept, not evaluated)".into()));
+            return Ok(EvalResult::Skip(
+                "Emacs Lisp formula (kept, not evaluated)".into(),
+            ));
         }
         let mut form = formula.clone();
         let dl = self.dline_number(line);
-        form = form.replace("@#", &dl.to_string()).replace("$#", &n0.to_string());
+        form = form
+            .replace("@#", &dl.to_string())
+            .replace("$#", &n0.to_string());
         static OLD: OnceLock<Regex> = OnceLock::new();
         if re(&OLD, r"&[-+0-9I]").is_match(&form) {
-            return abort(Some(f), "formula uses the old syntax for vertical references");
+            return abort(
+                Some(f),
+                "formula uses the old syntax for vertical references",
+            );
         }
         static REMOTE: OnceLock<Regex> = OnceLock::new();
         if re(&REMOTE, r"(?:^|[^A-Za-z0-9_])remote\(").is_match(&form) {
-            return Ok(EvalResult::Skip("remote references are not supported".into()));
+            return Ok(EvalResult::Skip(
+                "remote references are not supported".into(),
+            ));
         }
         // Complex ranges: the first `@...` match, while it is longer than `@`.
         let mut guard = 0;
         loop {
-            let Some(m) = range_re().find(&form) else { break };
+            let Some(m) = range_re().find(&form) else {
+                break;
+            };
             if m.as_str().len() <= 1 {
                 break;
             }
@@ -603,7 +730,9 @@ impl<'a> Engine<'a> {
                 Err(why) => return Ok(EvalResult::Skip(why)),
             };
             if form.len() - m.as_str().len() + rpl.len() > MAX_EXPANDED_FORMULA {
-                return Ok(EvalResult::Skip(format!("the formula grows past {MAX_EXPANDED_FORMULA} bytes")));
+                return Ok(EvalResult::Skip(format!(
+                    "the formula grows past {MAX_EXPANDED_FORMULA} bytes"
+                )));
             }
             if rpl.contains(&form) {
                 return abort(Some(f), format!("invalid reference \"{form}\""));
@@ -622,12 +751,20 @@ impl<'a> Engine<'a> {
             }
             let num = |g: usize| printf::small_int(c.get(g).map_or("0", |m| m.as_str()));
             let (Some(na), Some(nb)) = (num(1), num(3)) else {
-                return Ok(EvalResult::Skip("a column number cannot be read exactly".into()));
+                return Ok(EvalResult::Skip(
+                    "a column number cannot be read exactly".into(),
+                ));
             };
             let a = na - 1 + if c.get(2).is_some() { n0 as i64 } else { 0 };
             let b = nb + if c.get(4).is_some() { n0 as i64 } else { 0 };
             if a < 0 || b > fields.len() as i64 || a > b {
-                return abort(Some(f), format!("range {} is outside the row", c.get(0).map_or("", |m| m.as_str())));
+                return abort(
+                    Some(f),
+                    format!(
+                        "range {} is outside the row",
+                        c.get(0).map_or("", |m| m.as_str())
+                    ),
+                );
             }
             let slice = fields[a as usize..b as usize].to_vec();
             let rpl = match make_reference(&RangeVal::Many(slice), p.keep_empty, p.numbers) {
@@ -635,7 +772,9 @@ impl<'a> Engine<'a> {
                 Err(why) => return Ok(EvalResult::Skip(why)),
             };
             if form.len() + rpl.len() > MAX_EXPANDED_FORMULA {
-                return Ok(EvalResult::Skip(format!("the formula grows past {MAX_EXPANDED_FORMULA} bytes")));
+                return Ok(EvalResult::Skip(format!(
+                    "the formula grows past {MAX_EXPANDED_FORMULA} bytes"
+                )));
             }
             let r = c.get(0).map_or(0..0, |m| m.range());
             form.replace_range(r, &rpl);
@@ -651,7 +790,9 @@ impl<'a> Engine<'a> {
             }
             let raw = c.get(1).map_or("0", |m| m.as_str());
             let Some(mut n) = printf::small_int(raw) else {
-                return Ok(EvalResult::Skip(format!("the column number `${raw}` cannot be read exactly")));
+                return Ok(EvalResult::Skip(format!(
+                    "the column number `${raw}` cannot be read exactly"
+                )));
             };
             if c.get(2).is_some() {
                 n += n0 as i64;
@@ -666,7 +807,9 @@ impl<'a> Engine<'a> {
                 Err(why) => return Ok(EvalResult::Skip(why)),
             };
             if form.len() + rpl.len() > MAX_EXPANDED_FORMULA {
-                return Ok(EvalResult::Skip(format!("the formula grows past {MAX_EXPANDED_FORMULA} bytes")));
+                return Ok(EvalResult::Skip(format!(
+                    "the formula grows past {MAX_EXPANDED_FORMULA} bytes"
+                )));
             }
             if rpl.contains(&formula) {
                 return abort(Some(f), format!("invalid field specifier \"{whole}\""));
@@ -685,20 +828,30 @@ impl<'a> Engine<'a> {
             Err(Outcome::Unsupported(why)) => return Ok(EvalResult::Skip(why)),
         };
         let out = match &p.fmt {
-            Some(fmt) => match printf::string_to_number(&ev).ok_or(FormatError::Unsupported(
-                "of a number the plugin cannot convert exactly".into(),
-            )).and_then(|n| printf::format_one(fmt, &n)) {
+            Some(fmt) => match printf::string_to_number(&ev)
+                .ok_or(FormatError::Unsupported(
+                    "of a number the plugin cannot convert exactly".into(),
+                ))
+                .and_then(|n| printf::format_one(fmt, &n))
+            {
                 Ok(s) => s,
                 Err(FormatError::TooManySpecs) => {
-                    return abort(Some(f), format!("the format `{fmt}` has more than one `%` conversion"));
+                    return abort(
+                        Some(f),
+                        format!("the format `{fmt}` has more than one `%` conversion"),
+                    );
                 }
-                Err(FormatError::Unsupported(why)) => return Ok(EvalResult::Skip(format!("format {why}"))),
+                Err(FormatError::Unsupported(why)) => {
+                    return Ok(EvalResult::Skip(format!("format {why}")))
+                }
             },
             None => ev,
         };
         let out = out.replace('\n', "");
         if out.len() > crate::MAX_RAW_UTF16 {
-            return Ok(EvalResult::Skip("the result is longer than a block may be".into()));
+            return Ok(EvalResult::Skip(
+                "the result is longer than a block may be".into(),
+            ));
         }
         if out.contains('|') {
             return Ok(EvalResult::Skip("the result contains `|`".into()));
@@ -718,13 +871,22 @@ impl<'a> Engine<'a> {
     /// Store one result. Returns `false` when the formula was declined: the
     /// caller then stops, and the whole table is left as it was, since later
     /// formulas may read the cell Org would have changed.
-    fn apply(&mut self, res: EvalResult, line: usize, col: usize, formula: &str, report: &mut Report) -> bool {
+    fn apply(
+        &mut self,
+        res: EvalResult,
+        line: usize,
+        col: usize,
+        formula: &str,
+        report: &mut Report,
+    ) -> bool {
         match res {
             // Org inserts the text as is; aligning the table then trims the
             // field (`%5.1f` padding does not survive).
-            EvalResult::Value(v) => {
-                self.set_field(line, col, v.trim_matches([' ', '\t', '\r', '\n']).to_string())
-            }
+            EvalResult::Value(v) => self.set_field(
+                line,
+                col,
+                v.trim_matches([' ', '\t', '\r', '\n']).to_string(),
+            ),
             EvalResult::Error => {
                 report.error(formula);
                 self.set_field(line, col, "#ERROR".to_string());
@@ -767,14 +929,23 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
         } else if e.lhs.starts_with("$<") || e.lhs.starts_with("$>") {
             let new = handle_first_last(&e.lhs, nrows, ncol, &text)?;
             if eqlist.iter().any(|o| o.lhs == new) {
-                return abort(f, format!("\"{}=\" tries to overwrite the existing formula for column {new}", e.lhs));
+                return abort(
+                    f,
+                    format!(
+                        "\"{}=\" tries to overwrite the existing formula for column {new}",
+                        e.lhs
+                    ),
+                );
             }
             new
         } else {
             e.lhs.clone()
         };
         let lhs = handle_first_last(&lhs, nrows, ncol, &text)?;
-        if let Some(n) = re(&COL_LHS, r"^\$([0-9]+)$").captures(&lhs).and_then(|c| c.get(1)) {
+        if let Some(n) = re(&COL_LHS, r"^\$([0-9]+)$")
+            .captures(&lhs)
+            .and_then(|c| c.get(1))
+        {
             let n: usize = n.as_str().parse().unwrap_or(0);
             if n == 0 || n > 1000 {
                 return abort(f, "formula column target too large");
@@ -808,11 +979,17 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             let (a, c1, b, c2, _) = eng.range_corners(lhs, thisline, 1, text)?;
             let (first, last) = (a.min(b), a.max(b));
             let (fc, lc) = (c1.min(c2), c1.max(c2));
-            let (Some(r1), Some(r2)) = (eng.line_to_dline(first, false), eng.line_to_dline(last, true)) else {
+            let (Some(r1), Some(r2)) = (
+                eng.line_to_dline(first, false),
+                eng.line_to_dline(last, true),
+            ) else {
                 return abort(f, format!("the range {lhs} has no data lines"));
             };
             if r1 > r2 {
-                report.skip(text, &format!("the target range {lhs} has no data lines between its hlines"));
+                report.skip(
+                    text,
+                    &format!("the target range {lhs} has no data lines between its hlines"),
+                );
                 return Ok(report);
             }
             if fc < 1 || lc > 1000 {
@@ -831,8 +1008,16 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             let Some(c) = abs_field.captures(&t) else {
                 return abort(f, format!("unknown field {t}"));
             };
-            let r: usize = c.get(1).map_or("0", |m| m.as_str()).parse().unwrap_or(usize::MAX);
-            let col: usize = c.get(2).map_or("0", |m| m.as_str()).parse().unwrap_or(usize::MAX);
+            let r: usize = c
+                .get(1)
+                .map_or("0", |m| m.as_str())
+                .parse()
+                .unwrap_or(usize::MAX);
+            let col: usize = c
+                .get(2)
+                .map_or("0", |m| m.as_str())
+                .parse()
+                .unwrap_or(usize::MAX);
             if r == 0 || r > nrows {
                 return abort(f, format!("invalid row number in {t}"));
             }
@@ -842,23 +1027,40 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
     for (r, c, _, text) in &expanded {
         if !seen.insert((*r, *c)) {
-            return abort(Some(text), format!("several field/range formulas try to set @{r}${c}"));
+            return abort(
+                Some(text),
+                format!("several field/range formulas try to set @{r}${c}"),
+            );
         }
     }
-    let untouchable: HashSet<(usize, usize)> =
-        expanded.iter().map(|(r, c, _, _)| (eng.dlines[r - 1], *c)).collect();
+    let untouchable: HashSet<(usize, usize)> = expanded
+        .iter()
+        .map(|(r, c, _, _)| (eng.dlines[r - 1], *c))
+        .collect();
 
     // Which rows the column formulas run on.
     let first_field = |eng: &Engine, l: usize| eng.fields(l).first().cloned().unwrap_or_default();
-    let marked = eng.dlines.iter().any(|&l| matches!(first_field(&eng, l).trim(), "!" | "$" | "^" | "_" | "#" | "*"));
+    let marked = eng.dlines.iter().any(|&l| {
+        matches!(
+            first_field(&eng, l).trim(),
+            "!" | "$" | "^" | "_" | "#" | "*"
+        )
+    });
     let rows: Vec<usize> = if marked {
-        eng.dlines.iter().copied().filter(|&l| matches!(first_field(&eng, l).trim(), "#" | "*")).collect()
+        eng.dlines
+            .iter()
+            .copied()
+            .filter(|&l| matches!(first_field(&eng, l).trim(), "#" | "*"))
+            .collect()
     } else {
         let lines = &eng.table.lines;
-        let begin = lines.iter().position(|l| matches!(l, Line::Data(_))).and_then(|d| {
-            let h = d + lines[d..].iter().position(|l| matches!(l, Line::Hline))?;
-            Some(h + lines[h..].iter().position(|l| matches!(l, Line::Data(_)))?)
-        });
+        let begin = lines
+            .iter()
+            .position(|l| matches!(l, Line::Data(_)))
+            .and_then(|d| {
+                let h = d + lines[d..].iter().position(|l| matches!(l, Line::Hline))?;
+                Some(h + lines[h..].iter().position(|l| matches!(l, Line::Data(_)))?)
+            });
         let begin = begin.unwrap_or(0);
         eng.dlines.iter().copied().filter(|&l| l >= begin).collect()
     };
@@ -888,7 +1090,10 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
         // of different lengths that is not reproduced (review finding F5).
         let widths: HashSet<usize> = eng.dlines.iter().map(|&l| eng.fields(l).len()).collect();
         if widths.len() > 1 {
-            report.skip(text, "field formulas in a table whose rows have different numbers of fields");
+            report.skip(
+                text,
+                "field formulas in a table whose rows have different numbers of fields",
+            );
             return Ok(report);
         }
     }
@@ -899,7 +1104,10 @@ pub fn recalculate(table: &mut Table, formulas: &[Stored]) -> Result<Report, Abo
             return abort(Some(text), "formula column target too large");
         }
         if *c > width {
-            return abort(Some(text), format!("missing columns in the table for @{r}${c}"));
+            return abort(
+                Some(text),
+                format!("missing columns in the table for @{r}${c}"),
+            );
         }
         let res = eng.eval(rhs, l, *c, text)?;
         if !eng.apply(res, l, *c, text, &mut report) {

@@ -24,7 +24,11 @@ pub enum BlockResult {
     NoFormulas { org_line_in_markdown: bool },
     /// Recalculated; the text did not change.
     Unchanged { tables: usize, report: Report },
-    Changed { raw: String, tables: usize, report: Report },
+    Changed {
+        raw: String,
+        tables: usize,
+        report: Report,
+    },
 }
 
 /// How many recalculation passes to run before aligning.
@@ -42,7 +46,10 @@ pub enum Laps {
 /// Lines outside those tables are kept byte for byte.
 pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
     let lines: Vec<&str> = raw.split('\n').collect();
-    let bare: Vec<&str> = lines.iter().map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let bare: Vec<&str> = lines
+        .iter()
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
     let found = table::find_tables(&bare, dialect);
     if found.is_empty() {
         return Ok(BlockResult::NoTable);
@@ -57,7 +64,11 @@ pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
     if new_raw == raw {
         Ok(BlockResult::Unchanged { tables, report })
     } else {
-        Ok(BlockResult::Changed { raw: new_raw, tables, report })
+        Ok(BlockResult::Changed {
+            raw: new_raw,
+            tables,
+            report,
+        })
     }
 }
 
@@ -68,7 +79,10 @@ pub fn recalc_block(raw: &str, dialect: Dialect) -> Result<BlockResult, Abort> {
 /// a partial recalculation could write values Org would not (review F1).
 pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, Report), Abort> {
     let lines: Vec<&str> = raw.split('\n').collect();
-    let bare: Vec<&str> = lines.iter().map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let bare: Vec<&str> = lines
+        .iter()
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
     let found = table::find_tables(&bare, dialect);
     let mut report = Report {
         org_line_in_markdown: found.iter().any(|f| f.md_has_org_tblfm),
@@ -76,7 +90,10 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
     };
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut next = 0;
-    for f in found.iter().filter(|f| f.tblfm.is_some() || laps == Laps::AlignOnly) {
+    for f in found
+        .iter()
+        .filter(|f| f.tblfm.is_some() || laps == Laps::AlignOnly)
+    {
         out.extend(lines[next..f.start].iter().map(|l| l.to_string()));
         next = f.end;
         let original = || lines[f.start..f.end].iter().map(|l| l.to_string());
@@ -116,7 +133,10 @@ pub fn process_text(raw: &str, dialect: Dialect, laps: Laps) -> Result<(String, 
             }
             report.errors.extend(last.errors);
             if !converged {
-                return Err(Abort { formula: None, message: "no convergence after 10 iterations".into() });
+                return Err(Abort {
+                    formula: None,
+                    message: "no convergence after 10 iterations".into(),
+                });
             }
         }
         let rendered = t.render_checked(MAX_RAW_UTF16).ok_or_else(|| Abort {
@@ -140,34 +160,51 @@ fn clip(mut s: String) -> String {
 }
 
 fn notice(message: String, level: NoticeLevel) -> Effect {
-    Effect::Notice { message: clip(message), level: Some(level) }
+    Effect::Notice {
+        message: clip(message),
+        level: Some(level),
+    }
 }
 
 const ORG_LINE_HINT: &str =
     "In Markdown, write the formulas as `<!-- TBLFM: $3=$1*$2 -->` under the table (the `#+TBLFM:` line is not read).";
 
 fn report_notice(report: &Report, tables: usize, changed: bool) -> Option<Effect> {
-    let hint = if report.org_line_in_markdown { format!(" {ORG_LINE_HINT}") } else { String::new() };
+    let hint = if report.org_line_in_markdown {
+        format!(" {ORG_LINE_HINT}")
+    } else {
+        String::new()
+    };
     if report.errors.is_empty() && report.skipped.is_empty() {
         return if changed && hint.is_empty() {
             None
         } else if changed {
             Some(notice(hint.trim_start().to_string(), NoticeLevel::Info))
         } else {
-            let up = if tables == 1 { "Table is up to date." } else { "Tables are up to date." };
+            let up = if tables == 1 {
+                "Table is up to date."
+            } else {
+                "Tables are up to date."
+            };
             Some(notice(format!("{up}{hint}"), NoticeLevel::Info))
         };
     }
     let mut msg = String::new();
     if !report.skipped.is_empty() {
-        let list: Vec<String> =
-            report.skipped.iter().map(|s| format!("`{}` ({})", s.formula, s.reason)).collect();
+        let list: Vec<String> = report
+            .skipped
+            .iter()
+            .map(|s| format!("`{}` ({})", s.formula, s.reason))
+            .collect();
         let what = if report.declined_tables == 1 {
             "1 table was left unchanged".to_string()
         } else {
             format!("{} tables were left unchanged", report.declined_tables)
         };
-        msg.push_str(&format!("{what}, because the plugin cannot match Org on {}. ", list.join("; ")));
+        msg.push_str(&format!(
+            "{what}, because the plugin cannot match Org on {}. ",
+            list.join("; ")
+        ));
     }
     if !report.errors.is_empty() {
         let list: Vec<String> = report.errors.iter().map(|e| format!("`{e}`")).collect();
@@ -185,7 +222,11 @@ fn handle(event: &Event) -> Result<Vec<Effect>, String> {
         .focused_block
         .as_ref()
         .ok_or_else(|| "Put the cursor in a block with a table, then recalculate.".to_string())?;
-    let dialect = if block.format == Some(BlockFormat::Org) { Dialect::Org } else { Dialect::Markdown };
+    let dialect = if block.format == Some(BlockFormat::Org) {
+        Dialect::Org
+    } else {
+        Dialect::Markdown
+    };
     let result = recalc_block(&block.raw, dialect).map_err(|a| {
         clip(match a.formula {
             Some(f) => format!("Table formula `{f}`: {}. Nothing was changed.", a.message),
@@ -193,17 +234,31 @@ fn handle(event: &Event) -> Result<Vec<Effect>, String> {
         })
     })?;
     match result {
-        BlockResult::NoTable => Ok(vec![notice("This block has no table.".into(), NoticeLevel::Info)]),
-        BlockResult::NoFormulas { org_line_in_markdown } => {
+        BlockResult::NoTable => Ok(vec![notice(
+            "This block has no table.".into(),
+            NoticeLevel::Info,
+        )]),
+        BlockResult::NoFormulas {
+            org_line_in_markdown,
+        } => {
             let hint = match dialect {
                 Dialect::Org => "Add a `#+TBLFM: $3=$1*$2` line under the table.",
                 Dialect::Markdown if org_line_in_markdown => ORG_LINE_HINT,
                 Dialect::Markdown => "Add a `<!-- TBLFM: $3=$1*$2 -->` line under the table.",
             };
-            Ok(vec![notice(format!("No table formulas in this block. {hint}"), NoticeLevel::Info)])
+            Ok(vec![notice(
+                format!("No table formulas in this block. {hint}"),
+                NoticeLevel::Info,
+            )])
         }
-        BlockResult::Unchanged { tables, report } => Ok(report_notice(&report, tables, false).into_iter().collect()),
-        BlockResult::Changed { raw, tables, report } => {
+        BlockResult::Unchanged { tables, report } => {
+            Ok(report_notice(&report, tables, false).into_iter().collect())
+        }
+        BlockResult::Changed {
+            raw,
+            tables,
+            report,
+        } => {
             if raw.encode_utf16().count() > MAX_RAW_UTF16 {
                 // Refused: Tine would reject the oversized replacement anyway
                 // (malformed input bound); nothing is written.
@@ -242,7 +297,10 @@ mod tests {
             "Prices **today**\n| item | n | price | total |\n| ---- | - | ----- | ----- |\n| a    | 2 |     3 |     6 |\n| b    | 4 |   0.5 |    2. |\n<!-- TBLFM: $4=$2*$3 -->\nid:: 123"
         );
         // Idempotent.
-        assert!(matches!(recalc_block(&out, Dialect::Markdown).unwrap(), BlockResult::Unchanged { .. }));
+        assert!(matches!(
+            recalc_block(&out, Dialect::Markdown).unwrap(),
+            BlockResult::Unchanged { .. }
+        ));
     }
 
     #[test]
@@ -264,6 +322,9 @@ mod tests {
     #[test]
     fn crlf_and_tables_without_formulas_are_kept() {
         let raw = "| x |\r\n\r\n| 1 | |\r\n#+TBLFM: $2=$1+1\r\ntail";
-        assert_eq!(changed(raw, Dialect::Org), "| x |\r\n\r\n| 1 | 2 |\r\n#+TBLFM: $2=$1+1\r\ntail");
+        assert_eq!(
+            changed(raw, Dialect::Org),
+            "| x |\r\n\r\n| 1 | 2 |\r\n#+TBLFM: $2=$1+1\r\ntail"
+        );
     }
 }

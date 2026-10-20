@@ -41,11 +41,19 @@ pub fn small_int(s: &str) -> Option<i64> {
     };
     if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
         let sig = digits.trim_start_matches('0');
-        let v = if sig.len() > 7 { CAP } else { sig.parse::<i64>().unwrap_or(0).min(CAP) };
+        let v = if sig.len() > 7 {
+            CAP
+        } else {
+            sig.parse::<i64>().unwrap_or(0).min(CAP)
+        };
         return Some(if neg { -v } else { v });
     }
     match string_to_number(s)? {
-        LispNum::Int(v) => Some(v.to_i64().unwrap_or(if v.is_negative() { -CAP } else { CAP }).clamp(-CAP, CAP)),
+        LispNum::Int(v) => Some(
+            v.to_i64()
+                .unwrap_or(if v.is_negative() { -CAP } else { CAP })
+                .clamp(-CAP, CAP),
+        ),
         LispNum::Float(_) => None,
     }
 }
@@ -158,7 +166,10 @@ fn fmt_g(x: f64, p: usize, alt: bool, upper: bool) -> String {
         format!("{:.*}", p - 1, x)
     } else {
         let probe = format!("{:.*e}", p - 1, x);
-        let exp: i64 = probe.split_once('e').and_then(|(_, e)| e.parse().ok()).unwrap_or(0);
+        let exp: i64 = probe
+            .split_once('e')
+            .and_then(|(_, e)| e.parse().ok())
+            .unwrap_or(0);
         if exp < -4 || exp >= p as i64 {
             fmt_e(x, p - 1, upper)
         } else {
@@ -192,10 +203,18 @@ pub fn number_to_string(n: &LispNum) -> String {
         LispNum::Float(x) => {
             let x = *x;
             if x.is_nan() {
-                return if x.is_sign_negative() { "-0.0e+NaN".into() } else { "0.0e+NaN".into() };
+                return if x.is_sign_negative() {
+                    "-0.0e+NaN".into()
+                } else {
+                    "0.0e+NaN".into()
+                };
             }
             if x.is_infinite() {
-                return if x < 0.0 { "-1.0e+INF".into() } else { "1.0e+INF".into() };
+                return if x < 0.0 {
+                    "-1.0e+INF".into()
+                } else {
+                    "1.0e+INF".into()
+                };
             }
             let mut s = String::new();
             for p in 15..=17 {
@@ -260,7 +279,8 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
         }
         // Emacs allows a field number `N$`; not supported here (the `$`
         // ends up as an unknown conversion).
-        let (mut minus, mut plus, mut space, mut zero, mut alt) = (false, false, false, false, false);
+        let (mut minus, mut plus, mut space, mut zero, mut alt) =
+            (false, false, false, false, false);
         while i < chars.len() && "-+ 0#".contains(chars[i]) {
             match chars[i] {
                 '-' => minus = true,
@@ -273,7 +293,9 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
         }
         let mut width = 0usize;
         while i < chars.len() && chars[i].is_ascii_digit() {
-            width = width.saturating_mul(10).saturating_add(chars[i] as usize - '0' as usize);
+            width = width
+                .saturating_mul(10)
+                .saturating_add(chars[i] as usize - '0' as usize);
             i += 1;
         }
         let mut precision: Option<usize> = None;
@@ -281,7 +303,9 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
             i += 1;
             let mut p = 0usize;
             while i < chars.len() && chars[i].is_ascii_digit() {
-                p = p.saturating_mul(10).saturating_add(chars[i] as usize - '0' as usize);
+                p = p
+                    .saturating_mul(10)
+                    .saturating_add(chars[i] as usize - '0' as usize);
                 i += 1;
             }
             precision = Some(p);
@@ -315,7 +339,9 @@ pub fn format_one(fmt: &str, n: &LispNum) -> Result<String, FormatError> {
                         if precision.is_some() {
                             // Emacs prints a float's integer part without C's
                             // precision rule (`%.0d` of 0.5 is `0`).
-                            return unsupported(format!("a precision with `%{conv}` of a fraction"));
+                            return unsupported(format!(
+                                "a precision with `%{conv}` of a fraction"
+                            ));
                         }
                         BigInt::from(x.trunc() as i128)
                     }
@@ -451,24 +477,42 @@ mod tests {
         assert_eq!(number_to_string(&LispNum::Float(1000.0)), "1000.0");
         assert_eq!(number_to_string(&LispNum::Float(1e20)), "1e+20");
         assert_eq!(number_to_string(&LispNum::Float(1e-5)), "1e-05");
-        assert_eq!(number_to_string(&LispNum::Float(0.1 + 0.2)), "0.30000000000000004");
+        assert_eq!(
+            number_to_string(&LispNum::Float(0.1 + 0.2)),
+            "0.30000000000000004"
+        );
         assert_eq!(number_to_string(&LispNum::Int(BigInt::from(-7))), "-7");
     }
 
     #[test]
     fn formats_like_emacs() {
-        assert_eq!(format_one("%.2f", &LispNum::Float(1.0 / 3.0)).unwrap(), "0.33");
+        assert_eq!(
+            format_one("%.2f", &LispNum::Float(1.0 / 3.0)).unwrap(),
+            "0.33"
+        );
         assert_eq!(format_one("%.2f", &LispNum::int(3)).unwrap(), "3.00");
         assert_eq!(format_one("%.1f", &LispNum::Float(0.25)).unwrap(), "0.2");
         assert_eq!(format_one("%d", &LispNum::Float(-2.7)).unwrap(), "-2");
         assert_eq!(format_one("%d", &LispNum::Float(-0.7)).unwrap(), "0");
-        assert_eq!(format_one("%5.1f%%", &LispNum::Float(12.345)).unwrap(), " 12.3%");
-        assert_eq!(format_one("%e", &LispNum::Float(1234.5)).unwrap(), "1.234500e+03");
+        assert_eq!(
+            format_one("%5.1f%%", &LispNum::Float(12.345)).unwrap(),
+            " 12.3%"
+        );
+        assert_eq!(
+            format_one("%e", &LispNum::Float(1234.5)).unwrap(),
+            "1.234500e+03"
+        );
         assert_eq!(format_one("%g", &LispNum::Float(0.0001)).unwrap(), "0.0001");
-        assert_eq!(format_one("%g", &LispNum::Float(1234567.0)).unwrap(), "1.23457e+06");
+        assert_eq!(
+            format_one("%g", &LispNum::Float(1234567.0)).unwrap(),
+            "1.23457e+06"
+        );
         assert_eq!(format_one("%05d", &LispNum::int(42)).unwrap(), "00042");
         assert_eq!(format_one("EUR %s", &LispNum::int(5)).unwrap(), "EUR 5");
         assert_eq!(format_one("x", &LispNum::int(5)).unwrap(), "x");
-        assert_eq!(format_one("%d %d", &LispNum::int(5)), Err(FormatError::TooManySpecs));
+        assert_eq!(
+            format_one("%d %d", &LispNum::int(5)),
+            Err(FormatError::TooManySpecs)
+        );
     }
 }
