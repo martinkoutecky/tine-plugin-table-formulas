@@ -182,9 +182,11 @@ def main():
                 "test": c["test"], "line": c["line"], "laps": c["laps"],
                 "input": c["target"] + tblfm, "expected": c["expect"] + tblfm,
             })
-    json.dump({"source": "org-mode testing/lisp/test-org-table.el", "revision": revision,
-               "cases": cases}, sys.stdout, indent=1, ensure_ascii=False)
-    sys.stdout.write("\n")
+    # One case per line.
+    head = json.dumps({"source": "org-mode testing/lisp/test-org-table.el",
+                       "revision": revision}, ensure_ascii=False)
+    sys.stdout.write(head[:-1] + ', "cases": [\n'
+                     + ",\n".join(json.dumps(c, ensure_ascii=False) for c in cases) + "\n]}\n")
 
 
 main()
